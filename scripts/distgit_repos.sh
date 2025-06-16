@@ -30,6 +30,8 @@ if [[ $1 == "" ]]; then
     exit 0
 fi
 
+DRY_RUN="false"
+
 # Get the JWT authentication token
 get_token
 
