@@ -75,6 +75,9 @@ function clone_repos {
         IFS='/' read -r -a path <<< "$r"
         echo "Cloning: ${path[${#path[@]}-1]}"
         echo "git clone $r"
+        if [[ ${DRY_RUN} != "true" ]]; then
+            git clone $r
+        fi
         echo
     done
     popd
