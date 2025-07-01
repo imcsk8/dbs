@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS operating_system (
 	url TEXT NOT NULL,
 	license TEXT NOT NULL,
 	description TEXT NOT NULL,
-    manager INT NOT NULL DEFAULT 1 REFERENCES package_manager(id) ON DELETE CASCADE
+    manager INT NOT NULL DEFAULT 1 REFERENCES package_manager(id) ON DELETE CASCADE,
+    distro_tag TEXT
 );
 COMMENT ON TABLE operating_system IS E'Entity that integrates the genrated packages';
 
@@ -165,6 +166,7 @@ COMMENT ON COLUMN operating_system.url IS E'Operating system URL';
 COMMENT ON COLUMN operating_system.license IS E'Operating system license';
 COMMENT ON COLUMN operating_system.description IS E'Operating system description';
 COMMENT ON COLUMN operating_system.manager IS E'Package manage the OS is based on (rpm, dpkg, etc...)';
+COMMENT ON COLUMN operating_system.distro_tag IS E'Distribution tag eg: el10';
 
 CREATE INDEX IF NOT EXISTS idx_os_name ON operating_system
 USING btree
@@ -183,8 +185,7 @@ USING btree
 CREATE TABLE operating_system_package (
     id SERIAL PRIMARY KEY,
     id_os INT REFERENCES operating_system(id) ON DELETE CASCADE,
-    id_package INT REFERENCES package(id) ON DELETE CASCADE,
-    distro_tag TEXT
+    id_package INT REFERENCES package(id) ON DELETE CASCADE
 );
 COMMENT ON TABLE operating_system_package IS E'Which packages belong to the operating system';
 
