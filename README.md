@@ -33,10 +33,22 @@ scripts $ ./distgit_repos.sh pull
 
 ## CI/CD Build Pipeline
 
+### Requirements:
+
+* [Dagger](https://dagger.io)
+* NOTE: dagger needs the iptable_nat module: `sudo modprobe iptable_nat`
+
 ### Build packages in proper order
 
 The `core` and `base` package groups should be built before any package in the
 dist-git.
+
+* Get the `core` group package list.
+
+```bash
+~ $ dnf group info core
+...
+```
 
 **TODO**
 
