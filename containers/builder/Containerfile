@@ -1,0 +1,33 @@
+# vim:set ft=dockerfile:
+FROM quay.io/centos/centos:stream10
+
+MAINTAINER Iván Chavero <ichaver@chavero.com.mx>
+
+ENV VERSION=10.0  \
+	VER_SHORT=10 \
+    NAME=dbs
+
+ENV SUMMARY="Builder image for the Distribution Builder System"     \
+    DESCRIPTION="Image with the environment to build RPM packages from scratch"
+
+LABEL summary="${SUMMARY}"                                                               \
+      description="${DESCRIPTION}"                                                       \
+      io.k8s.description="${DESCRIPTION}"                                                \
+      io.k8s.display-name="DBS Builder"                                                  \
+      io.openshift.tags="builder,${NAME},${NAME}${VER_SHORT},${NAME}-${VER_SHORT}"       \
+      name="ghcr.io/${NAME}-${VER_SHORT}"                                                \
+      softwarelibre.mx.component="${NAME}-${VER_SHORT}-container"                        \
+      version="1"                                                                        \
+      help="For more information visit https://github.com/imcsk8/dbs"                    \
+      usage="podman ghcr.io/softwarelibremx/dbs:latest"                                  \
+      maintainer="Iván Chavero <ichavero@chavero.com.mx>"
+
+
+RUN set -eux                                  && \
+    echo ${NAME} > /etc/hostname              && \
+    dnf install -y epel-release               && \
+    dnf config-manager --set-enabled crb      && \
+    dnf group install -y "Development Tools"  && \
+    dnf install  -y rpmdevtools               && \
+    dnf clean all
+
