@@ -1,3 +1,5 @@
+BEGIN;
+
 DROP TYPE IF EXISTS os_type CASCADE;
 CREATE TYPE os_type AS
 ENUM ('VERSIONED', 'ROLLING');
@@ -7,71 +9,14 @@ CREATE TYPE os_format AS
 ENUM ('ISO', 'OCI', 'QCOW', 'RAW');
 
 
--- Product
-COMMENT ON TABLE product IS E'operating system in a specific format';
-CREATE TABLE IF NOT EXISTS product (
-    id SERIAL PRIMARY KEY,
-	id_os INT NOT NULL DEFAULT 1 REFERENCES operating_system(id) ON DELETE CASCADE,
-	format os_format NOT NULL DEFAULT 'ISO',
-)
-
-COMMENT ON COLUMN product.id_os IS E'ID of the operating system';
-COMMENT ON COLUMN product.format IS E'Format of the operating system: ISO, qcow, etc...';
-
-
-CREATE INDEX IF NOT EXISTS idx_product_format ON product
-USING btree
-(
-    format
-);
-
--- OS
-COMMENT ON TABLE operating_system IS E'Entity that integrates the genrated packages';
-CREATE TABLE IF NOT EXISTS operating_system (
-    id SERIAL PRIMARY KEY,
-	name TEXT NOT NULL,
-	version TEXT NOT NULL,
-	system_type os_type NOT NULL DEFAULT 'VERSIONED',
-	release TEXT NOT NULL,
-    architecture INT NOT NULL DEFAULT 1 REFERENCES architecture(id) ON DELETE CASCADE,
-	summary TEXT NOT NULL,
-	url TEXT NOT NULL,
-	license TEXT NOT NULL,
-	description TEXT NOT NULL,
-	manager package_manager NOT NULL DEFAULT 'rpm'
-)
-
-COMMENT ON COLUMN operating_system.name IS E'Name of the operating system';
-COMMENT ON COLUMN operating_system.version IS E'Operating system version';
-COMMENT ON COLUMN operating_system.system_type IS E'Operating system type: VERSIONED or ROLLING';
-COMMENT ON COLUMN operating_system.release IS E'Version of the operating system with id metadata';
-COMMENT ON COLUMN operating_system.architecture IS E'Operating system architecture: x86, x86_64, ARM, etc...';
-COMMENT ON COLUMN operating_system.summary IS E'Operating system summary';
-COMMENT ON COLUMN operating_system.url IS E'Operating system URL';
-COMMENT ON COLUMN operating_system.license IS E'Operating system license';
-COMMENT ON COLUMN operating_system.description IS E'Operating system description';
-COMMENT ON COLUMN operating_system.manager IS E'Package manage the OS is based on (rpm, dpkg, etc...)';
-
-CREATE INDEX IF NOT EXISTS idx_os_name ON operating_system
-USING btree
-(
-    name
-);
-
-CREATE INDEX IF NOT EXISTS idx_os_architecture ON operating_system
-USING btree
-(
-    architecture
-);
-
 
 -- Package Manager
-COMMENT ON TABLE package_manager IS E'Distribution package manager';
 CREATE TABLE IF NOT EXISTS package_manager (
 	id SERIAL PRIMARY KEY,
 	name TEXT NOT NULL,
-	description TEXT,
+	description TEXT
 );
+COMMENT ON TABLE package_manager IS E'Distribution package manager';
 
 
 COMMENT ON COLUMN package_manager.name IS E'Name of the package manager';
@@ -115,17 +60,17 @@ INSERT INTO package_manager (name, description) VALUES
 
 
 -- Architecture
-COMMENT ON TABLE architecture IS E'Operating system architecture';
 CREATE TABLE IF NOT EXISTS architecture (
 	id SERIAL PRIMARY KEY,
 	name TEXT NOT NULL,
-	description TEXT,
+	description TEXT
 );
+COMMENT ON TABLE architecture IS E'Operating system architecture';
 
 COMMENT ON COLUMN architecture.name IS E'Architecture name';
 COMMENT ON COLUMN architecture.description IS E'Architecture description';
 
-CREATE INDEX IF NOT EXISTS idx_architecture_name ON operating_system
+CREATE INDEX IF NOT EXISTS idx_architecture_name ON architecture
 USING btree
 (
     name
@@ -141,7 +86,6 @@ INSERT INTO architecture (name, description) VALUES
 
 
 -- Package
-COMMENT ON TABLE package_manager IS E'A package that integrates into the distribution';
 CREATE TABLE IF NOT EXISTS package (
     id SERIAL PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -158,22 +102,23 @@ CREATE TABLE IF NOT EXISTS package (
 	in_repo bool,   -- The package has been sent to a repository
 	created bool,   -- The package has been created
 	vulnerable bool -- Security advisories not addressed
-)
+);
+COMMENT ON TABLE package IS E'A package that integrates into the distribution';
 
-COMMENT ON COLUMN package_manager.name IS E'Name of the package';
-COMMENT ON COLUMN package_manager.version IS E'Package version';
-COMMENT ON COLUMN package_manager.release IS E'Package release';
-COMMENT ON COLUMN package_manager.architecture IS E'Package architecture';
-COMMENT ON COLUMN package_manager.package_size IS E'Package size';
-COMMENT ON COLUMN package_manager.source IS E'Package source URL';
-COMMENT ON COLUMN package_manager.repository IS E'Package repository';
-COMMENT ON COLUMN package_manager.summary IS E'Package summary';
-COMMENT ON COLUMN package_manager.url IS E'Package URL';
-COMMENT ON COLUMN package_manager.license IS E'Package license';
-COMMENT ON COLUMN package_manager.description IS E'Package description';
-COMMENT ON COLUMN package_manager.in_repo IS E'True if package has been uploaded to a repo';
-COMMENT ON COLUMN package_manager.created IS E'True if the package has been created';
-COMMENT ON COLUMN package_manager.vulnerable IS E'True if there are security advisories that have not been fixed';
+COMMENT ON COLUMN package.name IS E'Name of the package';
+COMMENT ON COLUMN package.version IS E'Package version';
+COMMENT ON COLUMN package.release IS E'Package release';
+COMMENT ON COLUMN package.architecture IS E'Package architecture';
+COMMENT ON COLUMN package.package_size IS E'Package size';
+COMMENT ON COLUMN package.source IS E'Package source URL';
+COMMENT ON COLUMN package.repository IS E'Package repository';
+COMMENT ON COLUMN package.summary IS E'Package summary';
+COMMENT ON COLUMN package.url IS E'Package URL';
+COMMENT ON COLUMN package.license IS E'Package license';
+COMMENT ON COLUMN package.description IS E'Package description';
+COMMENT ON COLUMN package.in_repo IS E'True if package has been uploaded to a repo';
+COMMENT ON COLUMN package.created IS E'True if the package has been created';
+COMMENT ON COLUMN package.vulnerable IS E'True if there are security advisories that have not been fixed';
 
 CREATE INDEX IF NOT EXISTS idx_name ON package
 USING btree
@@ -194,14 +139,55 @@ USING btree
 );
 
 
+-- OS
+CREATE TABLE IF NOT EXISTS operating_system (
+    id SERIAL PRIMARY KEY,
+	name TEXT NOT NULL,
+	version TEXT NOT NULL,
+	system_type os_type NOT NULL DEFAULT 'VERSIONED',
+	release TEXT NOT NULL,
+    architecture INT NOT NULL DEFAULT 1 REFERENCES architecture(id) ON DELETE CASCADE,
+	summary TEXT NOT NULL,
+	url TEXT NOT NULL,
+	license TEXT NOT NULL,
+	description TEXT NOT NULL,
+    manager INT NOT NULL DEFAULT 1 REFERENCES package_manager(id) ON DELETE CASCADE,
+    distro_tag TEXT
+);
+COMMENT ON TABLE operating_system IS E'Entity that integrates the genrated packages';
+
+COMMENT ON COLUMN operating_system.name IS E'Name of the operating system';
+COMMENT ON COLUMN operating_system.version IS E'Operating system version';
+COMMENT ON COLUMN operating_system.system_type IS E'Operating system type: VERSIONED or ROLLING';
+COMMENT ON COLUMN operating_system.release IS E'Version of the operating system with id metadata';
+COMMENT ON COLUMN operating_system.architecture IS E'Operating system architecture: x86, x86_64, ARM, etc...';
+COMMENT ON COLUMN operating_system.summary IS E'Operating system summary';
+COMMENT ON COLUMN operating_system.url IS E'Operating system URL';
+COMMENT ON COLUMN operating_system.license IS E'Operating system license';
+COMMENT ON COLUMN operating_system.description IS E'Operating system description';
+COMMENT ON COLUMN operating_system.manager IS E'Package manage the OS is based on (rpm, dpkg, etc...)';
+COMMENT ON COLUMN operating_system.distro_tag IS E'Distribution tag eg: el10';
+
+CREATE INDEX IF NOT EXISTS idx_os_name ON operating_system
+USING btree
+(
+    name
+);
+
+CREATE INDEX IF NOT EXISTS idx_os_architecture ON operating_system
+USING btree
+(
+    architecture
+);
+
 
 -- Operating system package relation
-COMMENT ON TABLE operating_system_package IS E'Which packages belong to the operating system';
 CREATE TABLE operating_system_package (
     id SERIAL PRIMARY KEY,
     id_os INT REFERENCES operating_system(id) ON DELETE CASCADE,
-    id_package INT REFERENCES package(id) ON DELETE CASCADE,
-)
+    id_package INT REFERENCES package(id) ON DELETE CASCADE
+);
+COMMENT ON TABLE operating_system_package IS E'Which packages belong to the operating system';
 
 COMMENT ON COLUMN operating_system_package.id_os IS E'Operating system ID';
 COMMENT ON COLUMN operating_system_package.id_package IS E'Package ID';
@@ -215,21 +201,41 @@ USING btree
 
 
 -- Package dependencies
-COMMENT ON TABLE package_dependencies IS E'Dependencies of a package';
 CREATE TABLE package_dependencies (
     id SERIAL PRIMARY KEY,
     id_package INT REFERENCES package(id) ON DELETE CASCADE,
-    id_dependency INT REFERENCES package(id) ON DELETE CASCADE,
-)
+    id_dependency INT REFERENCES package(id) ON DELETE CASCADE
+);
+COMMENT ON TABLE package_dependencies IS E'Dependencies of a package';
 
 
 COMMENT ON COLUMN package_dependencies.id_package IS E'Package ID';
 COMMENT ON COLUMN package_dependencies.id_dependency IS E'Dependent Package ID';
 
-CREATE INDEX IF NOT EXISTS idx_os_package ON operating_system_package
+CREATE INDEX IF NOT EXISTS idx_package_deps_os_package ON package_dependencies
 USING btree
 (
-    id_os,
-	id_package
+	id_package,
+    id_dependency
 );
 
+-- Product
+CREATE TABLE IF NOT EXISTS product (
+    id SERIAL PRIMARY KEY,
+	id_os INT NOT NULL DEFAULT 1 REFERENCES operating_system(id) ON DELETE CASCADE,
+	format os_format NOT NULL DEFAULT 'ISO'
+);
+COMMENT ON TABLE product IS E'operating system in a specific format';
+
+COMMENT ON COLUMN product.id_os IS E'ID of the operating system';
+COMMENT ON COLUMN product.format IS E'Format of the operating system: ISO, qcow, etc...';
+
+
+CREATE INDEX IF NOT EXISTS idx_product_format ON product
+USING btree
+(
+    format
+);
+
+
+COMMIT;
