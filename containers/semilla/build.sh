@@ -27,7 +27,11 @@ SCRATCHMOUNT=$(buildah mount $CONTAINER)
 
 echo "Extracting root image: ${ROOT_IMAGE}"
 pushd ${SCRATCHMOUNT}
-tar -xf ${ROOT_IMAGE}
+if [[ ${ROOT_IMAGE} =~ \.gz$ ]]; then
+    tar -zxf ${ROOT_IMAGE}
+else
+    tar -xf ${ROOT_IMAGE}
+fi
 popd
 
 buildah commit ${CONTAINER} ${CONTAINER_IMAGE}:latest
