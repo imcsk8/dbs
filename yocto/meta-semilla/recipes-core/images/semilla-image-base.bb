@@ -15,12 +15,15 @@ IMAGE_INSTALL += " \
     autoconf         \
     automake         \
     bash             \
+    bash-completion  \
     binutils         \
     coreutils        \
     gcc              \
     help2man         \
+    perl             \
     rpm              \
     rpm-build        \
     rpmdevtools      \
+    python3           \
     semilla-branding \
     "
