@@ -29,6 +29,8 @@ echo "Extracting root image: ${ROOT_IMAGE}"
 pushd ${SCRATCHMOUNT}
 if [[ ${ROOT_IMAGE} =~ \.gz$ ]]; then
     tar -zxf ${ROOT_IMAGE}
+elif [[ ${ROOT_IMAGE} =~ \.zstd$ ]]; then
+    tar --zstd -xf ${ROOT_IMAGE}
 else
     tar -xf ${ROOT_IMAGE}
 fi
