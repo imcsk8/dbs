@@ -1,0 +1,17 @@
+SUMMARY = "Python bindings for RPM"
+DESCRIPTION = "The rpm-python package contains a module for interpreting and \
+manipulating RPM files from Python."
+HOMEPAGE = "http://rpm.org/"
+LICENSE = "LGPL-2.1-plus"
+LIC_FILES_CHKSUM = "file://COPYING.LGPLv2.1;md5=4f3a972b2235c8e1d53b53f4a30e5454"
+
+inherit pypi setuptools3
+
+PYPI_PACKAGE = "python3-rpm"
+SRC_URI[sha256sum] = "8891d4e0e4708170c8c07c2a74c767472251a798544e393a521ef3760a92f022"
+
+# The python bindings need the rpm libraries to link against
+DEPENDS += "rpm"
+
+# At runtime, the python module needs the rpm shared libraries
+RDEPENDS:${PN} += "rpm"
