@@ -18,12 +18,43 @@ IMAGE_INSTALL += " \
     bash-completion  \
     binutils         \
     coreutils        \
+    cmake            \
+    dnf              \
+    dwz              \
+    elfutils         \
+    findutils        \
+    gawk             \
     gcc              \
+    gcc-symlinks     \
+    grep             \
     help2man         \
+    libunwind        \
+    make             \
     perl             \
+    python3          \
     rpm              \
     rpm-build        \
+    rpm-dev          \
     rpmdevtools      \
-    python3           \
+    sed              \
     semilla-branding \
+    patch            \
+    python3-python-utils      \
+    python3-typing-extensions \
+    python3-progressbar2      \
+    python3-requests          \
+    python3-rpm               \
     "
+
+# This function will run after all packages are installed into the rootfs.
+# The ${IMAGE_ROOTFS} variable points to the root directory of your new image.
+create_rpm_tool_symlinks() {
+    echo "Creating symlinks for RPM tools in ${IMAGE_ROOTFS}${bindir}"
+    # Use -r to avoid errors if a link already exists from another package
+    ln -fsr ${IMAGE_ROOTFS}/bin/* ${IMAGE_ROOTFS}${bindir}/
+    # rpmbuild needs 'true' to be in /bin/true
+    ln -s /usr/bin/true.coreutils ${IMAGE_ROOTFS}/true
+}
+
+# Add our function to the list of commands to run at the end of rootfs creation.
+ROOTFS_POSTPROCESS_COMMAND += "create_rpm_tool_symlinks;"
