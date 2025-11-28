@@ -5,12 +5,13 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 # Location of the source code. 'file://' points to the 'files' subdirectory.
 SRC_URI = "           \
     file://os-release \
+    file://macros.dist \
 "
 
 # Add files to main package
 # PN defines the list of files and directories that go into the 
 # main package for your recipe
-FILES:${PN} += "/usr/lib/os-release"
+FILES:${PN} += "/usr/lib/os-release /usr/lib/rpm/macros.d/macros.dist"
 
 # The compilation step is handled automatically by the default do_compile task,
 # which calls 'gcc hello.c -o hello'.
@@ -24,7 +25,9 @@ do_install() {
     echo "***********************************************"
 
     install -d ${D}/usr/lib
+    install -d ${D}/usr/lib/rpm/macros.d
     install -d ${D}/etc
     install -m 0755 ${WORKDIR}/sources/os-release ${D}/usr/lib/os-release
     ln -sf ${INSTALLDIR}/usr/lib/os-release ${D}/${sysconfdir}/os-release
+    install -m 0755 ${WORKDIR}/sources/macros.dist ${D}/usr/lib/rpm/macros.d/macros.dist
 }
