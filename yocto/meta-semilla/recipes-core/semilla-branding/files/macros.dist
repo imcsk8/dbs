@@ -1,0 +1,15 @@
+# dist macros.
+
+%__bootstrap ~bootstrap
+%semilla_ver 10
+%semilla 10
+%centos_ver 10
+%centos 10
+%rhel 10
+%el10 1
+%distcore            .el10
+%dist %{!?distprefix0:%{?distprefix}}%{expand:%{lua:for i=0,9999 do print("%{?distprefix" .. i .."}") end}}%{distcore}%{?distsuffix}%{?with_bootstrap:~bootstrap}
+%dist_vendor         Semilla OS Hackers
+%dist_name           Semilla
+%dist_home_url       https://dbs.org/
+%dist_bug_report_url https://bugs.dbs.org/

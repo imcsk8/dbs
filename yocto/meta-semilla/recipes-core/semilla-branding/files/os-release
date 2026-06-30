@@ -1,0 +1,23 @@
+# Basic identification
+NAME="DBS Semilla Linux"
+ID=semilla
+ID_LIKE=dbs
+PRETTY_NAME="Semilla Builder 0.1.0 (Reinventing wheels)"
+VERSION="0.1.0 (Reinventing wheels)"
+VERSION_ID="0.1.0"
+VERSION_CODENAME=reinventing-wheels
+VARIANT="DBS Foundations"
+VARIANT_ID=dbs
+BUILD_ID="20250713-001"
+IMAGE_ID="semilla-0.1.0"
+IMAGE_VERSION="0.1.0"
+HOME_URL="https://ivan.chavero.com.mx/dbs/semilla"
+DOCUMENTATION_URL="https://ivan.chavero.com.mx/dbs/semilla/docs"
+SUPPORT_URL="https://ivan.chavero.com.mx/dbs/semilla/support"
+BUG_REPORT_URL="https://github.com/imcsk8/dbs/issues"
+PRIVACY_POLICY_URL="https://ivan.chavero.com.mx/dbs/privacy"
+CPE_NAME="cpe:/o:dbs:semilla:0.1.0"
+ANSI_COLOR="0;31"
+LOGO=semilla-logo-icon
+DEFAULT_HOSTNAME=semilla
+

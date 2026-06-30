@@ -1,0 +1,75 @@
+From 63348bb15cafa8ad0d0882eabd914cf9e775de89 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Iv=C3=A1n=20Chavero?= <ichavero@chavero.com.mx>
+Date: Sat, 30 Aug 2025 00:59:24 -0600
+Subject: [PATCH] Update shebang to python3
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The shebang: /usr/bin/python was causing QA problems in
+yocto.
+
+Upstream-Status: Pending
+
+Signed-off-by: Iván Chavero <ichavero@chavero.com.mx>
+---
+ rpmdev-bumpspec       | 2 +-
+ rpmdev-checksig       | 2 +-
+ rpmdev-rmdevelrpms.py | 2 +-
+ rpmdev-sort           | 2 +-
+ rpmdev-vercmp         | 2 +-
+ 5 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/rpmdev-bumpspec b/rpmdev-bumpspec
+index 5a6a909..d4c7dfa 100755
+--- a/rpmdev-bumpspec
++++ b/rpmdev-bumpspec
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python -tt
++#!/usr/bin/python3
+ # -*- mode: Python; indent-tabs-mode: nil; coding: utf-8 -*-
+ #
+ # Copyright (c) 2005-2014 Fedora Project
+diff --git a/rpmdev-checksig b/rpmdev-checksig
+index af757b7..5ac94c8 100755
+--- a/rpmdev-checksig
++++ b/rpmdev-checksig
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python -tt
++#!/usr/bin/python3
+ #
+ # This program is free software; you can redistribute it and/or modify
+ # it under the terms of the GNU General Public License as published by
+diff --git a/rpmdev-rmdevelrpms.py b/rpmdev-rmdevelrpms.py
+index 18c1345..a39fba7 100755
+--- a/rpmdev-rmdevelrpms.py
++++ b/rpmdev-rmdevelrpms.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python -tt
++#!/usr/bin/python3
+ # -*- coding: utf-8 -*-
+ 
+ # rpmdev-rmdevelrpms -- Find (and optionally remove) "development" RPMs
+diff --git a/rpmdev-sort b/rpmdev-sort
+index c957f52..bcc3ea7 100755
+--- a/rpmdev-sort
++++ b/rpmdev-sort
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python -tt
++#!/usr/bin/python3
+ # -*- coding: utf-8 -*-
+ #
+ # rpmdev-sort -- sort rpms from standard input
+diff --git a/rpmdev-vercmp b/rpmdev-vercmp
+index c28857c..047c79d 100755
+--- a/rpmdev-vercmp
++++ b/rpmdev-vercmp
+@@ -1,4 +1,4 @@
+-#!/usr/bin/python -tt
++#!/usr/bin/python3 -tt
+ # -*- coding: utf-8 -*-
+ #
+ # rpmdev-vercmp -- compare rpm versions
+-- 
+2.50.0
+
