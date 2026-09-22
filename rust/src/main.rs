@@ -9,20 +9,23 @@ use std::sync::Arc;
 use clap::Parser;
 use eyre::{eyre, Result};
 
+pub mod chroot;
 pub mod cli;
 pub mod dag;
 pub mod db;
 pub mod distgit;
+pub mod lookaside;
 pub mod models;
 pub mod runner;
 pub mod schema;
 pub mod types;
 
-use cli::{BuildArgs, Cli, Commands, DagArgs, DistgitArgs, DistgitCommands, ExploreArgs, OsArgs, PkgArgs};
+use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, DagArgs, DistgitArgs, DistgitCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
 use dag::DependencyGraph;
 use distgit::provider::DistroConfig;
 use distgit::spec::{parse_spec_file, SpecMetadata};
 use distgit::DistGitClient;
+use lookaside::LookasideManager;
 use runner::{BuildOutput, BuildRunner, MockRunner, RpmbuildRunner};
 
 #[tokio::main]
@@ -36,6 +39,8 @@ async fn main() -> Result<()> {
         Commands::Os(args) => handle_os(args).await?,
         Commands::Pkg(args) => handle_pkg(args).await?,
         Commands::Dag(args) => handle_dag(args).await?,
+        Commands::Chroot(args) => handle_chroot(args).await?,
+        Commands::Lookaside(args) => handle_lookaside(args).await?,
     }
 
     Ok(())
@@ -169,10 +174,11 @@ async fn handle_distgit(args: DistgitArgs) -> Result<()> {
             }
         }
 
-        DistgitCommands::Sync { distro, dest, concurrency, sources, search, limit, record_db } => {
+        DistgitCommands::Sync { distro, dest, concurrency, sources, search, limit, record_db, lookaside_dir } => {
             let config = DistroConfig::from_preset(&distro)
                 .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
             let client = Arc::new(DistGitClient::new(config));
+            let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
 
             println!("Discovering packages in {} matching query '{:?}'...", distro, search);
             let projects = client.explore(search.as_deref(), Some(limit)).await?;
@@ -216,14 +222,12 @@ async fn handle_distgit(args: DistgitArgs) -> Result<()> {
                         }
 
                         if sources {
-                            println!("  Downloading lookaside sources for {}...", status.package_name);
-                            match client.download_lookaside_sources(&status.local_path, &status.package_name).await {
-                                Ok(files) => {
-                                    for f in files {
-                                        println!("    * Staged: {}", f.display());
-                                    }
+                            println!("  Sourcing archives into lookaside for {}...", status.package_name);
+                            match lookaside_mgr.sync_dir(&status.local_path, 2).await {
+                                Ok(report) => {
+                                    println!("    * Lookaside: {} cached, {} downloaded, {} failed", report.already_cached, report.downloaded, report.failed);
                                 }
-                                Err(e) => eprintln!("    ✗ Lookaside download failed: {}", e),
+                                Err(e) => eprintln!("    ✗ Lookaside sync failed: {}", e),
                             }
                         }
                     }
@@ -287,12 +291,30 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
         None
     };
 
+    if args.fetch_sources {
+        println!("Checking and synchronizing sources into lookaside cache for targets...");
+        for target in &args.targets {
+            if !target.to_string_lossy().ends_with(".src.rpm") {
+                let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
+                let sources_dir = runner::resolve_sources_dir(target);
+                runner::ensure_sources_present(target, &sources_dir, pkg_stem, args.lookaside_dir.as_deref());
+            }
+        }
+    }
+
     match args.runner.to_lowercase().as_str() {
         "mock" => {
-            let chroot = args.mock_root.unwrap_or_else(|| "fedora-rawhide-x86_64".to_string());
-            let mut runner = MockRunner::new(chroot);
-            if let Some(cfg) = args.mock_config_dir {
-                runner = runner.with_config_dir(cfg);
+            let chroot_spec = args.mock_root.unwrap_or_else(|| "fedora-rawhide-x86_64".to_string());
+            let mut runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir)?;
+            if let Some(l_dir) = args.lookaside_dir {
+                runner = runner.with_lookaside_dir(l_dir);
+            }
+            println!(" Chroot Profile: {}", runner.root_name);
+            if let Some(cfg) = &runner.config_dir {
+                println!(" Chroot Config:  {}", cfg.display());
+            }
+            if let Some(ld) = &runner.lookaside_dir {
+                println!(" Lookaside Dir:  {}", ld.display());
             }
 
             if args.chain {
@@ -540,12 +562,35 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
         }
     }
 
+    if args.fetch_sources {
+        let lookaside_mgr = LookasideManager::resolve_default(args.lookaside_dir.as_deref());
+        println!("\n▶ Synchronizing source archives into lookaside cache ({}) for packages in {}...", lookaside_mgr.root.display(), args.path.display());
+        match lookaside_mgr.sync_dir(&args.path, args.concurrency).await {
+            Ok(report) => {
+                if report.total_sources_found > 0 {
+                    println!("✓ Lookaside synchronization: {} already cached, {} downloaded, {} failed (total: {})",
+                        report.already_cached, report.downloaded, report.failed, report.total_sources_found);
+                }
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to synchronize lookaside sources: {}", e);
+            }
+        }
+    }
+
     if args.build {
         println!("\nExecuting layered build orchestration with runner '{}'...", args.runner);
-        let chroot = args.mock_root.unwrap_or_else(|| "fedora-rawhide-x86_64".to_string());
-        let mut mock_runner = MockRunner::new(chroot);
-        if let Some(cfg) = args.mock_config_dir {
-            mock_runner = mock_runner.with_config_dir(cfg);
+        let chroot_spec = args.mock_root.unwrap_or_else(|| "fedora-rawhide-x86_64".to_string());
+        let mut mock_runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir)?;
+        if let Some(l_dir) = args.lookaside_dir {
+            mock_runner = mock_runner.with_lookaside_dir(l_dir);
+        }
+        println!(" Chroot Profile: {}", mock_runner.root_name);
+        if let Some(cfg) = &mock_runner.config_dir {
+            println!(" Chroot Config:  {}", cfg.display());
+        }
+        if let Some(ld) = &mock_runner.lookaside_dir {
+            println!(" Lookaside Dir:  {}", ld.display());
         }
         let runner_arc = Arc::new(mock_runner);
 
@@ -599,6 +644,258 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
                         Err(e) => eprintln!("✗ Worker build error: {}", e),
                     }
                 }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatches the `chroot` subcommand to list, inspect, check, add, or init Mock configurations.
+async fn handle_chroot(args: ChrootArgs) -> Result<()> {
+    match args.command {
+        ChrootCommands::List { dir, all } => {
+            println!("===========================================================");
+            println!(" DBS Discovered Mock Chroot Configurations");
+            if let Some(custom) = &dir {
+                println!(" Custom Directory: {}", custom.display());
+            }
+            println!(" System Configs:   {}", if all { "included (/etc/mock)" } else { "excluded (use --all to show)" });
+            println!("===========================================================");
+
+            let configs = chroot::ChrootResolver::list_all(dir.as_deref(), all)?;
+            if configs.is_empty() {
+                println!("No chroot configurations found.");
+                println!("Hint: You can import or initialize a config with 'dbs chroot add <path>' or 'dbs chroot init <name>'.");
+            } else {
+                for c in configs {
+                    let status = if c.valid { "✓ VALID" } else { "✗ INVALID" };
+                    println!("  * [{}] {}", status, c.name);
+                    println!("    Path:         {}", c.path.display());
+                    if let Some(arch) = &c.target_arch {
+                        println!("    Architecture: {}", arch);
+                    }
+                    if let Some(pkg_mgr) = &c.package_manager {
+                        println!("    Package Mgr:  {}", pkg_mgr);
+                    }
+                    if let Some(release) = &c.releasever {
+                        println!("    Releasever:   {}", release);
+                    }
+                    if let Some(desc) = &c.description {
+                        println!("    Description:  {}", desc);
+                    }
+                    if !c.includes.is_empty() {
+                        println!("    Includes:     {}", c.includes.join(", "));
+                    }
+                    if let Some(err) = &c.validation_error {
+                        println!("    Error:        {}", err);
+                    }
+                    println!();
+                }
+            }
+            println!("===========================================================");
+        }
+
+        ChrootCommands::Inspect { target, dir } => {
+            let resolved = match chroot::ChrootResolver::resolve(&target, dir.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return Err(eyre!("Failed to resolve chroot '{}': {}", target, e)),
+            };
+            let config = chroot::ChrootResolver::parse_config(&resolved.config_path);
+
+            println!("===========================================================");
+            println!(" Mock Chroot Configuration Inspection: {}", config.name);
+            println!("===========================================================");
+            println!("  Profile Name:     {}", config.name);
+            println!("  Config File:      {}", config.path.display());
+            println!("  Config Directory: {}", config.config_dir.display());
+            println!("  Target Arch:      {}", config.target_arch.as_deref().unwrap_or("unspecified"));
+            println!("  Package Manager:  {}", config.package_manager.as_deref().unwrap_or("dnf"));
+            println!("  Release Version:  {}", config.releasever.as_deref().unwrap_or("unspecified"));
+            println!("  Dist Macro:       {}", config.dist.as_deref().unwrap_or("unspecified"));
+            println!("  Vendor Macro:     {}", config.vendor.as_deref().unwrap_or("unspecified"));
+            println!("  Bootstrap Image:  {}", config.bootstrap_image.as_deref().unwrap_or("none"));
+            if let Some(desc) = &config.description {
+                println!("  Description:      {}", desc);
+            }
+            println!("  Template Includes ({}):", config.includes.len());
+            for inc in &config.includes {
+                let full = config.config_dir.join(inc);
+                let exists = if full.is_file() { "found" } else { "MISSING" };
+                println!("    * {} [{}] ({})", inc, exists, full.display());
+            }
+            println!("  Status:           {}", if config.valid { "✓ Valid and complete" } else { "✗ Invalid" });
+            if let Some(err) = &config.validation_error {
+                println!("  Validation Error: {}", err);
+            }
+            println!("===========================================================");
+        }
+
+        ChrootCommands::Check { target, dir } => {
+            println!("===========================================================");
+            println!(" Testing Mock Chroot Configuration: {}", target);
+            println!("===========================================================");
+            let report = match chroot::ChrootResolver::check(&target, dir.as_deref()) {
+                Ok(r) => r,
+                Err(e) => return Err(eyre!("Failed to check chroot '{}': {}", target, e)),
+            };
+
+            println!("  Profile Name:     {}", report.config.name);
+            println!("  Config File:      {}", report.config.path.display());
+            println!("  Architecture:     {}", report.config.target_arch.as_deref().unwrap_or("unknown"));
+            println!("  Package Manager:  {}", report.config.package_manager.as_deref().unwrap_or("unknown"));
+            println!("  Templates Valid:  {}", if report.config.valid { "✓ All includes found" } else { "✗ Missing template" });
+
+            if report.mock_verified {
+                println!("  Mock Verification: ✓ Success");
+                if let Some(root_path) = &report.mock_root_path {
+                    println!("  Mock Root Path:    {}", root_path);
+                }
+            } else {
+                println!("  Mock Verification: ✗ Failed");
+                if let Some(err) = &report.error_message {
+                    println!("  Error Details:     {}", err);
+                }
+            }
+            println!("===========================================================");
+
+            if !report.mock_verified {
+                return Err(eyre!("Mock verification failed for chroot '{}'", target));
+            }
+        }
+
+        ChrootCommands::Add { path, dest } => {
+            println!("Importing chroot configuration from {} into {}...", path.display(), dest.display());
+            let copied_path = match chroot::ChrootResolver::add(&path, &dest) {
+                Ok(p) => p,
+                Err(e) => return Err(eyre!("Failed to import chroot from '{}': {}", path.display(), e)),
+            };
+            println!("✓ Successfully imported configuration: {}", copied_path.display());
+            println!("Verifying imported configuration with Mock...");
+            match chroot::ChrootResolver::check(copied_path.to_str().unwrap_or_default(), Some(&dest)) {
+                Ok(check) => {
+                    if check.mock_verified {
+                        println!("✓ Chroot verified by Mock successfully.");
+                    } else {
+                        eprintln!("Warning: Mock check reported an issue: {:?}", check.error_message);
+                    }
+                }
+                Err(e) => eprintln!("Warning: Mock verification encountered an error: {}", e),
+            }
+        }
+
+        ChrootCommands::Init { name, arch, dest } => {
+            println!("Initializing new Mock chroot configuration '{}' (arch: {}) in {}...", name, arch, dest.display());
+            let created_path = match chroot::ChrootResolver::init(&name, &arch, &dest) {
+                Ok(p) => p,
+                Err(e) => return Err(eyre!("Failed to initialize chroot '{}': {}", name, e)),
+            };
+            println!("✓ Successfully initialized chroot configuration: {}", created_path.display());
+            println!("  Template created at: {}/templates/{}.tpl", dest.display(), name);
+            println!("You can customize this configuration and verify it using 'dbs chroot check {}'", name);
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatches the `lookaside` subcommand for managing source archive storage and synchronization.
+async fn handle_lookaside(args: LookasideArgs) -> Result<()> {
+    let mgr = LookasideManager::resolve_default(args.dir.as_deref());
+
+    match args.command {
+        LookasideCommands::Upload { file, pkg, spec, no_sources } => {
+            println!("===========================================================");
+            println!(" DBS Dist-git Lookaside Uploader");
+            println!(" Repository: {}", mgr.root.display());
+            println!(" Package:    {}", pkg);
+            println!(" File:       {}", file.display());
+            println!(" FS Type:    {}", if mgr.is_btrfs_fs() { "BTRFS (FICLONE CoW reflink enabled)" } else { "Standard filesystem" });
+            println!("===========================================================");
+
+            let res = mgr.upload(&file, &pkg, spec.as_deref(), !no_sources)?;
+
+            println!("\n✓ Archive successfully registered in lookaside:");
+            println!("  * Package:       {}", res.package);
+            println!("  * File:          {}", res.filename);
+            println!("  * Size:          {:.2} MB", res.size_bytes as f64 / (1024.0 * 1024.0));
+            println!("  * SHA-512:       {}", res.hash);
+            println!("  * Storage Mode:  {}", res.reflink_mode);
+            println!("  * CAS Path:      {}", res.cas_path.display());
+            println!("  * Dist-git Path: {}", res.pkgs_path.display());
+            if let Some(m) = res.manifest_updated {
+                println!("  * Manifest:      Updated {}", m.display());
+            }
+        }
+
+        LookasideCommands::Get { pkg, file, hash, dest } => {
+            println!("Retrieving {} ({:.12}...) into {}...", file, hash, dest.display());
+            let target_dest = if dest.is_dir() {
+                dest.join(&file)
+            } else {
+                dest
+            };
+
+            let mode = mgr.get_or_fetch(&pkg, &file, &hash, &target_dest)?;
+            println!("✓ Staged: {} ({})", target_dest.display(), mode);
+        }
+
+        LookasideCommands::Sync { path, concurrency } => {
+            println!("===========================================================");
+            println!(" DBS Dist-git Lookaside Cache Synchronizer");
+            println!(" Lookaside Root: {}", mgr.root.display());
+            println!(" Dist-git Path:  {}", path.display());
+            println!(" Concurrency:    {} tasks", concurrency);
+            println!("===========================================================");
+
+            let report = mgr.sync_dir(&path, concurrency).await?;
+            println!("\nSync completed:");
+            println!("  * Total Archives Declared: {}", report.total_sources_found);
+            println!("  * Already Cached Locally:  {}", report.already_cached);
+            println!("  * Successfully Fetched:    {}", report.downloaded);
+            println!("  * Failed Downloads:        {}", report.failed);
+            for f in &report.failures {
+                eprintln!("    ✗ {}", f);
+            }
+        }
+
+        LookasideCommands::Status => {
+            let status = mgr.status()?;
+            println!("===========================================================");
+            println!(" DBS Dist-git Lookaside Status & Storage Metrics");
+            println!("===========================================================");
+            println!(" Root Directory:        {}", status.root.display());
+            println!(" Filesystem Engine:     {}", if status.is_btrfs { "BTRFS (Reflinks & CoW Compression Active)" } else { "Non-BTRFS (Standard / Ext4)" });
+            println!(" CAS Unique Archives:   {}", status.total_cas_objects);
+            println!(" CAS Physical Storage:  {:.2} MB ({:.2} GB)", 
+                status.total_cas_bytes as f64 / (1024.0 * 1024.0),
+                status.total_cas_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            );
+            println!(" Distinct Packages:     {}", status.total_packages);
+            println!(" Dist-git Exposed Files:{}", status.total_package_entries);
+
+            if status.is_btrfs {
+                println!("\n💡 BTRFS Storage Optimizations:");
+                println!("  * CoW Reflinks:        Enabled (0 disk overhead for staged packages)");
+                println!("  * Force Compression:   btrfs filesystem defragment -r -czstd:3 {}", status.root.display());
+                println!("  * Block Deduplication: duperemove -drh {}", status.root.display());
+                println!("  * Subvolume Snapshots: btrfs subvolume snapshot -r {} <snapshot-path>", status.root.display());
+            } else {
+                println!("\n💡 Storage Recommendation:");
+                println!("  Mount a dedicated BTRFS subvolume at /srv/dbs/lookaside with 'compress=zstd:3' to unlock");
+                println!("  instant FICLONE zero-disk copies, block deduplication, and subvolume snapshot replication.");
+            }
+            println!("===========================================================");
+        }
+
+        LookasideCommands::Gc { dry_run, distgit } => {
+            println!("Running Lookaside Garbage Collection (dry_run: {})...", dry_run);
+            let report = mgr.gc(dry_run, distgit.as_deref())?;
+            println!("  * Scanned CAS Objects: {}", report.scanned_objects);
+            println!("  * Orphaned Objects:    {}", report.orphaned_objects.len());
+            println!("  * Reclaimable Space:   {:.2} MB", report.reclaimed_bytes as f64 / (1024.0 * 1024.0));
+            for orphan in &report.orphaned_objects {
+                println!("    {} {}", if dry_run { "[DRY RUN] Would delete:" } else { "Pruned:" }, orphan.display());
             }
         }
     }

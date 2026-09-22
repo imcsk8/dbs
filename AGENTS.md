@@ -131,6 +131,46 @@ dbs dag -i data/distgit --report reports/dependency_graph.md
 dbs dag -i data/distgit --build -r fedora-rawhide-x86_64 -j 4 -o staging --record-db
 ```
 
+### Mock Chroot Configuration Management
+```bash
+# List all discovered Mock chroots across workspace, project, and user search paths
+dbs chroot list
+
+# Include system defaults from /etc/mock
+dbs chroot list --all
+
+# Inspect a chroot configuration profile or .cfg file
+dbs chroot inspect tacos-rolling-x86_64
+
+# Check and validate a chroot configuration with Mock
+dbs chroot check tacos-rolling-x86_64
+dbs chroot check /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg
+
+# Import custom chroots into workspace (./mock)
+dbs chroot add /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg
+
+# Scaffold a new distribution chroot template
+dbs chroot init my-distro-x86_64 --arch x86_64
+```
+
+### Dist-Git Lookaside Cache Management (BTRFS CoW)
+```bash
+# Display lookaside metrics, CAS storage, and BTRFS filesystem status
+dbs lookaside status
+
+# Upload source archive, compute SHA-512, store in CAS, and update dist-git 'sources'
+dbs lookaside upload --pkg zstd --file /path/to/zstd-1.5.7.tar.gz --spec data/distgit/zstd/zstd.spec
+
+# Concurrently pre-fetch missing source archives across cloned repositories
+dbs lookaside sync -i data/distgit -j 4
+
+# Retrieve archive by SHA-512 into local path
+dbs lookaside get --pkg zstd --file zstd-1.5.7.tar.gz --hash <sha512> --dest ./SOURCES/
+
+# Prune unreferenced/orphaned source archives from CAS
+dbs lookaside gc --dry-run --distgit data/distgit
+```
+
 ### Operating System & Package Catalog Database Management
 ```bash
 # List supported operating system presets and registered database records

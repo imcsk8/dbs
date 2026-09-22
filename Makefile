@@ -8,6 +8,7 @@ DB_CONTAINER="dbs_pg"
 	mkdir data
 
 dirs: data
+	mkdir -p bin mock data/distgit staging
 
 db: data
 	@echo "Starting development database container"
@@ -17,7 +18,7 @@ db: data
 		-e POSTGRES_DB=$(DB_NAME)                                    \
 		-e POSTGRES_INITDB_ARGS="--encoding UTF-8"                   \
 		-v ./data:/var/lib/postgresql/data:U,Z                       \
-		-p 127.0.0.1:9436:5432 ghcr.io/enterprisedb/postgresql:18    \
+		-p 127.0.0.1:9436:5432 ghcr.io/enterprisedb/postgresql:17    \
 		-c shared_buffers=512MB                                      \
 		-c work_mem=64MB                                             \
 		-c synchronous_commit=off                                    \

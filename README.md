@@ -15,6 +15,7 @@ A modern, high-throughput, distribution-agnostic operating system build platform
   * Native parallel worker pools (`-j`) via Tokio async semaphores.
   * Sequential Mock chain compilation (`--chain`).
   * Dynamic local repository feedback (`--dynamic-repo`), automatically indexing built RPMs and feeding them back to concurrent workers via `--addrepo=file://...`.
+* **Content-Addressable Storage (CAS) & BTRFS Lookaside:** Native lookaside cache manager (`dbs lookaside`) storing source archives deduplicated by SHA-512 with Linux `FICLONE` Copy-on-Write (CoW) reflinks for instant, 0-disk-overhead source staging into Mock.
 * **PostgreSQL Supply Chain Catalog:** Diesel-backed relational schema tracking operating systems, packages (EVR, source RPMs, git commits), granular capability dependencies (`Provides`, `Requires`, `BuildRequires`), and staged binary RPM artifacts.
 
 ---
@@ -102,6 +103,24 @@ Compile packages in isolated chroots:
 ./bin/dbs dag -i data/distgit --build -r fedora-rawhide-x86_64 -j 4 -o staging
 ```
 
+### 7. Manage Lookaside Cache (BTRFS CoW)
+
+Store, verify, and maintain source tarballs with zero-disk BTRFS reflinks:
+
+```bash
+# Check lookaside status and filesystem engine
+./bin/dbs lookaside status
+
+# Upload and register a new source tarball and update dist-git 'sources' manifest:
+./bin/dbs lookaside upload -p zstd -f /path/to/zstd-1.5.7.tar.gz --spec data/distgit/zstd/zstd.spec
+
+# Pre-fetch and cache all sources across your cloned dist-git repositories:
+./bin/dbs lookaside sync -i data/distgit -j 4
+
+# Garbage collect unreferenced/orphaned source archives
+./bin/dbs lookaside gc --dry-run
+```
+
 ---
 
 ## Command Reference
@@ -113,8 +132,10 @@ Compile packages in isolated chroots:
 | `dbs distgit sync` | `-j`, `--sources`, `--search`, `--record-db` | Batch synchronize multiple repositories and lookaside sources concurrently. |
 | `dbs distgit pull` | `-o <dest>` | Pull git updates for all cloned repositories in the destination folder. |
 | `dbs distgit inspect` | `<path>` | Parse `.spec` file and display EVR, sources, patches, and dependencies. |
-| `dbs dag` | `-i <path>`, `--report`, `--build` | Compute topological build order (DAG) using Kahn's algorithm and execute layered builds. |
-| `dbs build` | `-r <chroot>`, `-j <workers>`, `--chain`, `--dynamic-repo` | Compile packages in Mock or host rpmbuild with dynamic local repo feedback. |
+| `dbs dag` | `-i <path>`, `--report`, `--build`, `--fetch-sources` | Compute topological build order (DAG), auto-cache sources in lookaside, and execute layered builds. |
+| `dbs build` | `-r <chroot>`, `-j <workers>`, `--chain`, `--fetch-sources` | Compile packages in Mock or rpmbuild with auto-lookaside source caching and dynamic repo feedback. |
+| `dbs lookaside` | `upload`, `get`, `sync`, `status`, `gc` | Maintain Content-Addressable Storage (CAS) for source archives with BTRFS CoW reflinks. |
+| `dbs chroot` / `mock` | `list`, `inspect`, `check`, `add`, `init` | Discover, inspect, validate, and manage custom Mock chroot configurations. |
 | `dbs os` | `list`, `add`, `delete` | Manage operating system distribution definitions and presets. |
 | `dbs pkg` | `list`, `add`, `delete` | Query and manage packages in the PostgreSQL supply chain catalog. |
 

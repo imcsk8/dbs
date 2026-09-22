@@ -261,25 +261,66 @@ Inspect `reports/dag_plan.md` to see:
 
 ---
 
-## 8. Hermetic Compilation with Mock
+## 8. Hermetic Compilation with Mock & Custom Chroot Profiles
 
 Mock provides clean chroot environments using DNF/RPM. It isolates the build process from the host system.
 
-### Compiling a Single Package
+DBS provides native support for discovering, validating, and compiling packages using **custom distribution chroot profiles** (such as `tacos-rolling-x86_64.cfg` with nested templates from `/home/imcsk8/projects/gemini-workdir/tacos/mock`).
 
-Compile `lz4` in the `fedora-rawhide-x86_64` Mock chroot:
+### Discovering & Validating Chroots
+
+Discover all available chroots across workspace `./mock`, project paths (`../tacos/mock`), and user configs:
 
 ```bash
-./bin/dbs build -r fedora-rawhide-x86_64 -o staging data/distgit/lz4/lz4.spec
+./bin/dbs chroot list
 ```
 
-During this step, DBS will:
+Inspect the parsed configuration and verify all nested template includes (`include('templates/tacos-rolling.tpl')`):
+
+```bash
+./bin/dbs chroot inspect tacos-rolling-x86_64
+```
+
+Validate that Mock can initialize the buildroot successfully:
+
+```bash
+./bin/dbs chroot check tacos-rolling-x86_64
+```
+
+### Compiling with Custom Chroots
+
+You can specify a chroot using either:
+1. **Its profile name:** DBS automatically searches `./mock`, `../tacos/mock`, and system paths:
+   ```bash
+   ./bin/dbs build -r tacos-rolling-x86_64 -o staging data/distgit/lz4/lz4.spec
+   ```
+2. **A direct file path:** DBS automatically extracts the parent directory as the Mock `--configdir` so all included templates resolve properly:
+   ```bash
+   ./bin/dbs build -r /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg \
+     -o staging data/distgit/lz4/lz4.spec
+   ```
+
+### Importing or Scaffolding New Chroots
+
+To import an external chroot configuration and its `templates/` folder into your DBS workspace:
+
+```bash
+./bin/dbs chroot add /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg
+```
+
+To scaffold a clean starter template for a new distribution:
+
+```bash
+./bin/dbs chroot init my-distribution-x86_64 --arch x86_64
+```
+
+### Inspecting Built Artifacts
+
+During compilation, DBS will:
 1. Run `mock --buildsrpm` to produce a source RPM (`.src.rpm`).
 2. Run `mock --rebuild` inside the hermetic chroot.
 3. Extract generated binary RPMs (`.rpm`) and build logs (`build.log`, `root.log`) into `staging/RPMS/` and `staging/logs/`.
 4. Index `staging/RPMS/` using `createrepo_c`.
-
-### Inspecting Built Artifacts
 
 ```bash
 ls -la staging/RPMS/
@@ -338,7 +379,101 @@ make bootstrap
 
 ---
 
-## 11. Troubleshooting & Best Practices
+## 11. Maintaining the Dist-Git Lookaside Cache (BTRFS CoW)
+
+In dist-git workflows, large source archives (tarballs, upstream zip archives) are deliberately excluded from Git tracking. Instead, packages maintain a `sources` manifest containing SHA-512 hashes.
+
+DBS includes a native, storage-efficient **Content-Addressable Storage (CAS)** lookaside manager (`dbs lookaside`) with deep BTRFS Copy-on-Write (`FICLONE` ioctl) integration.
+
+### Setting up a Storage-Efficient BTRFS Subvolume
+
+For maximum speed and space efficiency, host the lookaside cache on a dedicated BTRFS subvolume with transparent Zstandard compression:
+
+```bash
+# 1. Create a dedicated BTRFS subvolume
+sudo btrfs subvolume create /srv/dbs/lookaside
+
+# 2. Add to /etc/fstab with zstd compression and CoW enabled:
+# UUID=<disk-uuid>  /srv/dbs/lookaside  btrfs  subvol=@lookaside,compress=zstd:3,noatime,space_cache=v2  0 0
+
+# 3. Ensure permissions for your build user
+sudo chown -R $USER:mock /srv/dbs/lookaside
+```
+
+### Inspecting Lookaside Metrics & BTRFS Engine
+
+Check cache capacity, deduplicated archives, and filesystem features:
+
+```bash
+./bin/dbs lookaside status
+```
+
+Output:
+```text
+===========================================================
+ DBS Dist-git Lookaside Status & Storage Metrics
+===========================================================
+ Root Directory:        /srv/dbs/lookaside
+ Filesystem Engine:     BTRFS (Reflinks & CoW Compression Active)
+ CAS Unique Archives:   42
+ CAS Physical Storage:  312.45 MB (0.30 GB)
+ Distinct Packages:     28
+ Dist-git Exposed Files:42
+
+💡 BTRFS Storage Optimizations:
+  * CoW Reflinks:        Enabled (0 disk overhead for staged packages)
+  * Force Compression:   btrfs filesystem defragment -r -czstd:3 /srv/dbs/lookaside
+  * Block Deduplication: duperemove -drh /srv/dbs/lookaside
+===========================================================
+```
+
+### Uploading a Source Archive
+
+When adding a new upstream version or creating a package, upload the tarball into lookaside:
+
+```bash
+./bin/dbs lookaside upload \
+  --pkg zstd \
+  --file /tmp/zstd-1.5.7.tar.gz \
+  --spec data/distgit/zstd/zstd.spec
+```
+
+This will:
+1. Stream-compute the SHA-512 hash (`8ce01b...`).
+2. Store the file once in Content-Addressable Storage (`.cas/sha512/8c/8ce01b...`).
+3. Create a zero-cost BTRFS reflink in the public dist-git path (`pkgs/zstd/zstd-1.5.7.tar.gz/sha512/8ce01b.../zstd-1.5.7.tar.gz`).
+4. Update the package's dist-git `sources` manifest file with:
+   `SHA512 (zstd-1.5.7.tar.gz) = 8ce01b...`
+
+### Bulk Pre-fetching Dist-Git Sources
+
+Pre-fetch all declared tarballs across your local dist-git repositories directly into the lookaside cache:
+
+```bash
+./bin/dbs lookaside sync -i data/distgit -j 4
+```
+
+### Pruning Orphaned Tarballs (Garbage Collection)
+
+Detect and clean up archives in the CAS storage that are no longer referenced by any dist-git `sources` manifest:
+
+```bash
+# Preview unreferenced archives without deleting:
+./bin/dbs lookaside gc --dry-run --distgit data/distgit
+
+# Safely prune orphaned files to reclaim disk space:
+./bin/dbs lookaside gc --distgit data/distgit
+```
+
+### Zero-Disk Staging During Builds
+
+When building packages (`dbs build` or `dbs dag --build`), DBS checks the lookaside cache before attempting network downloads. If found, it creates a **BTRFS CoW reflink** (`FICLONE`) directly into Mock's `SOURCES/` directory:
+- **Duration:** 0.001 seconds
+- **Disk Usage:** 0 extra bytes (shared data extents until modified)
+
+---
+
+## 12. Troubleshooting & Best Practices
 
 ### Mock Permissions
 * **Issue:** `mock: error: Cannot find user in mock group`
