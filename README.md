@@ -1,7 +1,7 @@
 # Distribution Build System (DBS)
 
 Documentation and software for building  linux distributions from
-a given dist-git.
+a given source package git repository.
 
 There are many ways of creating Linux distributions and it appears that
 each distribution has its own "secret sauce" for bootstrapping and building
@@ -11,6 +11,8 @@ This project is aimed to allow users to create Linux distributions from scratch
 regardless of the package system.
 
 ## Steps for creating a distribution
+
+TODO
 
 ### Get CentOS dist-git repositories
 
@@ -31,12 +33,7 @@ scripts $ ./distgit_repos.sh clone
 scripts $ ./distgit_repos.sh pull
 ```
 
-## CI/CD Build Pipeline
-
-### Requirements:
-
-* [Dagger](https://dagger.io)
-* NOTE: dagger needs the iptable_nat module: `sudo modprobe iptable_nat`
+## Build Pipeline
 
 ### Build packages in proper order
 
