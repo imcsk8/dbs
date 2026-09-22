@@ -385,20 +385,65 @@ In dist-git workflows, large source archives (tarballs, upstream zip archives) a
 
 DBS includes a native, storage-efficient **Content-Addressable Storage (CAS)** lookaside manager (`dbs lookaside`) with deep BTRFS Copy-on-Write (`FICLONE` ioctl) integration.
 
-### Setting up a Storage-Efficient BTRFS Subvolume
+### Recommended BTRFS Storage Architecture & Setup
 
-For maximum speed and space efficiency, host the lookaside cache on a dedicated BTRFS subvolume with transparent Zstandard compression:
+While DBS is filesystem-agnostic and functions transparently on Ext4, XFS, tmpfs, and ZFS via automatic hardlink and copy fallbacks, using **BTRFS** unlocks significant enterprise performance and storage advantages:
+
+1. **Kernel `FICLONE` Copy-on-Write Reflinks**: Staging gigabytes of source tarballs into Mock chroots takes **0.001 seconds** and consumes **0 additional bytes** of disk space until files are modified.
+2. **Transparent Zstandard Compression**: Files like patches, firmware, and uncompressed archives compress on the fly with near-zero CPU overhead.
+3. **Out-of-Band Block Deduplication**: Identical 128KB blocks shared between minor package versions (e.g. `zstd-1.5.6` and `zstd-1.5.7`) share underlying storage extents.
+4. **Subvolume Isolation & Atomic Replication**: Snapshots can be sent to remote build mirrors via `btrfs send | btrfs receive`.
+
+#### Step 1: Create the Dedicated Lookaside Subvolume
 
 ```bash
-# 1. Create a dedicated BTRFS subvolume
+# Create parent directory
+sudo mkdir -p /srv/dbs
+
+# Create the dedicated BTRFS subvolume
 sudo btrfs subvolume create /srv/dbs/lookaside
-
-# 2. Add to /etc/fstab with zstd compression and CoW enabled:
-# UUID=<disk-uuid>  /srv/dbs/lookaside  btrfs  subvol=@lookaside,compress=zstd:3,noatime,space_cache=v2  0 0
-
-# 3. Ensure permissions for your build user
-sudo chown -R $USER:mock /srv/dbs/lookaside
 ```
+
+#### Step 2: Configure Mount Options in `/etc/fstab`
+
+To ensure transparent compression and fast disk I/O, configure the subvolume mount in `/etc/fstab`:
+
+```text
+# Dedicated BTRFS lookaside mount with zstd compression and fast access
+UUID=<disk-uuid>  /srv/dbs/lookaside  btrfs  subvol=@lookaside,compress=zstd:3,noatime,space_cache=v2  0 0
+```
+
+> [!TIP]
+> **Reflink Boundary Rule:** Linux `FICLONE` system calls only succeed when the source (lookaside cache) and destination (package staging/build tree) reside on the **same BTRFS filesystem pool**. Keeping `/srv/dbs/lookaside` and `data/distgit` (or your build workspaces) within the same BTRFS filesystem guarantees 100% zero-cost CoW staging.
+
+#### Step 3: Set Ownership & Permissions
+
+Ensure your development user and the `mock` build group have read and write permissions:
+
+```bash
+sudo chown -R $USER:mock /srv/dbs/lookaside
+sudo chmod 2775 /srv/dbs/lookaside
+```
+
+#### Step 4: Advanced BTRFS Maintenance & Optimization
+
+* **Force Zstandard Compression on Existing Archives:**
+  ```bash
+  sudo btrfs filesystem defragment -r -czstd:3 /srv/dbs/lookaside
+  ```
+
+* **Deduplicate Duplicate Blocks with `duperemove`:**
+  ```bash
+  sudo dnf install -y duperemove
+  sudo duperemove -drh /srv/dbs/lookaside
+  ```
+
+* **Create Read-Only Atomic Snapshots for Backups or Mirroring:**
+  ```bash
+  sudo btrfs subvolume snapshot -r /srv/dbs/lookaside /srv/dbs/lookaside-snap-$(date +%Y%m%d)
+  # Stream snapshot incrementally to a remote mirror:
+  # sudo btrfs send /srv/dbs/lookaside-snap-... | ssh mirror "sudo btrfs receive /srv/dbs/lookaside"
+  ```
 
 ### Inspecting Lookaside Metrics & BTRFS Engine
 

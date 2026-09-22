@@ -22,7 +22,7 @@ A modern, high-throughput, distribution-agnostic operating system build platform
 
 ## Quickstart
 
-### 1. Prerequisites
+### 1. Prerequisites & Storage Setup
 
 Ensure your host system has the required build and packaging utilities installed:
 * **Rust & Cargo** (1.80+ or 2024 edition)
@@ -35,6 +35,23 @@ Ensure your host system has the required build and packaging utilities installed
 sudo dnf install -y rust cargo mock createrepo_c git
 sudo usermod -a -G mock $USER
 newgrp mock
+```
+
+#### Recommended BTRFS Storage Setup (Optional for Production Builders)
+DBS is filesystem-agnostic and works out-of-the-box on any Linux filesystem (Ext4, XFS, tmpfs, ZFS) by automatically falling back to hardlinks or standard file copies. 
+
+For high-throughput builders, hosting `/srv/dbs/lookaside` on a dedicated **BTRFS subvolume** unlocks kernel-level Copy-on-Write (`FICLONE` ioctl) reflinks (instant 0.001s source staging with **0 extra bytes of disk space**) and transparent Zstandard compression:
+
+```bash
+# 1. Create dedicated lookaside subvolume
+sudo mkdir -p /srv/dbs
+sudo btrfs subvolume create /srv/dbs/lookaside
+
+# 2. (Optional) Recommended mount options in /etc/fstab:
+# UUID=<disk-uuid>  /srv/dbs/lookaside  btrfs  subvol=@lookaside,compress=zstd:3,noatime,space_cache=v2  0 0
+
+# 3. Grant permissions to your user and mock group:
+sudo chown -R $USER:mock /srv/dbs/lookaside
 ```
 
 ### 2. Build DBS
