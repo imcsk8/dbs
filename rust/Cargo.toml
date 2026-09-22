@@ -1,0 +1,21 @@
+[package]
+name = "dbs"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "dbs"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5.40", features = ["derive", "env", "wrap_help"] }
+chrono = { version = "0.4.41", features = ["serde"] }
+diesel = { version = "~2.2.11", features = ["postgres", "r2d2", "uuid", "chrono", "serde_json"] }
+eyre = "~0.6.12"
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+tokio = { version = "~1.46.0", features = ["full"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -30,6 +30,9 @@ stop-db:
 .env:
 	echo "DATABASE_URL=postgres://dbs:prueba123!@127.0.0.1:5436/dbs" > .env
 
+bin:
+	mkdir -p bin
+
 release_dirs: bin
 
 clean_db:
@@ -38,15 +41,22 @@ clean_db:
 bootstrap:
 	sql/migrate.sh up
 
+build:
+	make -C rust build
+
+test:
+	make -C rust test
+
 run: .env
-	make -C rust/pipeline run
+	make -C rust run
 
 debug:
-	make -C rust/pipeline debug
+	make -C rust debug
 
 clean:
-	make -C rust/pipeline clean
+	make -C rust clean
 
 release: release_dirs
-	make -C rust/pipeline release
+	make -C rust release
+	cp rust/bin/dbs bin/dbs
 

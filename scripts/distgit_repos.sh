@@ -40,7 +40,8 @@ case $1 in
             clone_repos
         ;;
       pull)
-            pull_repos
+            echo "UNIMPLEMENTED!!"
+            #pull_repos
         ;;
         *) usage
 esac

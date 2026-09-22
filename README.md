@@ -1,59 +1,153 @@
 # Distribution Build System (DBS)
 
-Documentation and software for building  linux distributions from
-a given source package git repository.
+A modern, high-throughput, distribution-agnostic operating system build platform written in Rust.
 
-There are many ways of creating Linux distributions and it appears that
-each distribution has its own "secret sauce" for bootstrapping and building
-the base image and I don't like that.
+**DBS** eliminates opaque, ad-hoc distribution bootstrapping scripts ("secret sauces") by providing a unified, declarative pipeline for discovering, synchronizing, inspecting, analyzing, and compiling packages directly from **dist-git** repositories across any RPM-based distribution (Fedora Rawhide, CentOS Stream, TacOS, RHEL, AlmaLinux, Rocky, etc.).
 
-This project is aimed to allow users to create Linux distributions from scratch
-regardless of the package system.
+---
 
-## Steps for creating a distribution
+## Key Features
 
-TODO
+* **Multi-Distribution Dist-Git Engine:** Pure Rust client supporting Fedora Rawhide (Pagure API), CentOS Stream 10/9 (GitLab API), TacOS (Forgejo/Codeberg API), and generic git repositories.
+* **Upstream Re-branding & Remotes:** Clone upstream dist-git repositories under their original names or custom names (`--as`, `--rename-spec`), while reconfiguring remotes (`--new-origin`) so `origin` points to your distribution and `upstream` tracks upstream changes.
+* **Topological DAG Compilation Engine:** Deterministic, non-recursive layered scheduler using **Kahn's algorithm (In-Degree BFS)** to resolve parallel compilation layers (Layer 0, Layer 1, ...) and immediately flag circular dependencies.
+* **Hermetic Mock Runner:** Isolated build execution using Mock chroots with:
+  * Native parallel worker pools (`-j`) via Tokio async semaphores.
+  * Sequential Mock chain compilation (`--chain`).
+  * Dynamic local repository feedback (`--dynamic-repo`), automatically indexing built RPMs and feeding them back to concurrent workers via `--addrepo=file://...`.
+* **PostgreSQL Supply Chain Catalog:** Diesel-backed relational schema tracking operating systems, packages (EVR, source RPMs, git commits), granular capability dependencies (`Provides`, `Requires`, `BuildRequires`), and staged binary RPM artifacts.
 
-### Get CentOS dist-git repositories
+---
 
-**Get repository metadata**
+## Quickstart
 
-```bash
-scripts $ ./sync_distgit.sh
-```
+### 1. Prerequisites
 
-**Clone Repositories**
-```bash
-scripts $ ./distgit_repos.sh clone
-```
-
-**Pull Repositories**
-**TODO**
-```bash
-scripts $ ./distgit_repos.sh pull
-```
-
-## Build Pipeline
-
-### Build packages in proper order
-
-The `core` and `base` package groups should be built before any package in the
-dist-git.
-
-* Get the `core` group package list.
+Ensure your host system has the required build and packaging utilities installed:
+* **Rust & Cargo** (1.80+ or 2024 edition)
+* **Mock** (v6.0+)
+* **createrepo_c**
+* **git**
 
 ```bash
-~ $ dnf group info core
-...
+# On Fedora / ELN / CentOS Stream:
+sudo dnf install -y rust cargo mock createrepo_c git
+sudo usermod -a -G mock $USER
+newgrp mock
 ```
 
-**TODO**
+### 2. Build DBS
 
-### Build the other packages
+Compile the project and install the binary:
 
-TODO: Automate this task 
+```bash
+git clone https://codeberg.org/imcsk8/dbs.git
+cd dbs
+make release
+```
 
-### Build Images
+The optimized release binary is located at `./bin/dbs`. Verify installation:
 
-TODO: Create pipeline modules for building ISO, qcow and container images
+```bash
+./bin/dbs --help
+```
 
+### 3. Explore Remote Packages
+
+Search for packages across Fedora Rawhide or CentOS Stream without leaving your terminal:
+
+```bash
+# Search Fedora Rawhide dist-git
+./bin/dbs explore --distro fedora-rawhide --search zstd
+
+# Search CentOS Stream 10 dist-git
+./bin/dbs explore --distro centos-stream-10 --search python
+```
+
+### 4. Clone Dist-Git Repositories
+
+Clone upstream package sources and configure your distribution's remote:
+
+```bash
+# Clone directly from Fedora Rawhide and configure Codeberg/Forgejo remote:
+./bin/dbs distgit clone --distro fedora-rawhide zstd \
+  --new-origin https://codeberg.org/imcsk8/tacos/zstd.git
+
+# Clone under a custom package name with spec renaming:
+./bin/dbs distgit clone --distro fedora-rawhide fedora-release \
+  --as tacos-release --rename-spec
+```
+
+### 5. Analyze Dependencies & Compilation Layers (DAG)
+
+Inspect package `.spec` files and calculate parallel compilation layers:
+
+```bash
+# Calculate build layers across dist-git packages
+./bin/dbs dag -i data/distgit
+
+# Generate a detailed Markdown dependency report
+./bin/dbs dag -i data/distgit --report reports/dependency_layers.md
+```
+
+### 6. Build in Mock
+
+Compile packages in isolated chroots:
+
+```bash
+# Compile a single package in Mock
+./bin/dbs build -r fedora-rawhide-x86_64 -o staging data/distgit/zstd/zstd.spec
+
+# Automatically compile all packages layer-by-layer in topological order
+./bin/dbs dag -i data/distgit --build -r fedora-rawhide-x86_64 -j 4 -o staging
+```
+
+---
+
+## Command Reference
+
+| Command | Subcommand / Options | Description |
+| :--- | :--- | :--- |
+| `dbs explore` | `--distro`, `--search`, `--limit` | Search remote packages across Pagure, GitLab, or Forgejo APIs. |
+| `dbs distgit clone` | `--distro`, `--as`, `--rename-spec`, `--new-origin` | Clone dist-git repositories with optional renaming and remote setup. |
+| `dbs distgit sync` | `-j`, `--sources`, `--search`, `--record-db` | Batch synchronize multiple repositories and lookaside sources concurrently. |
+| `dbs distgit pull` | `-o <dest>` | Pull git updates for all cloned repositories in the destination folder. |
+| `dbs distgit inspect` | `<path>` | Parse `.spec` file and display EVR, sources, patches, and dependencies. |
+| `dbs dag` | `-i <path>`, `--report`, `--build` | Compute topological build order (DAG) using Kahn's algorithm and execute layered builds. |
+| `dbs build` | `-r <chroot>`, `-j <workers>`, `--chain`, `--dynamic-repo` | Compile packages in Mock or host rpmbuild with dynamic local repo feedback. |
+| `dbs os` | `list`, `add`, `delete` | Manage operating system distribution definitions and presets. |
+| `dbs pkg` | `list`, `add`, `delete` | Query and manage packages in the PostgreSQL supply chain catalog. |
+
+---
+
+## Hands-On Tutorial
+
+For a complete step-by-step walkthrough detailing how to create, re-remote, resolve dependencies, and compile packages for a distribution, see [TUTORIAL.md](file:///home/imcsk8/projects/gemini-workdir/dbs/TUTORIAL.md).
+
+---
+
+## Development
+
+```bash
+make dirs      # Prepare data/ and bin/ directories
+make test      # Run all unit tests
+make build     # Compile debug binary
+make release   # Compile optimized release binary into ./bin/dbs
+make clean     # Clean target and generated artifacts
+```
+
+### Database Setup (Optional)
+
+DBS can track all packages, capabilities, and artifacts in a local PostgreSQL database:
+
+```bash
+make db        # Start PostgreSQL development container
+make bootstrap # Run database migrations up
+make clean_db  # Run database migrations down
+```
+
+---
+
+## License
+
+Licensed under the Apache License, Version 2.0 or GNU General Public License v3.0+.

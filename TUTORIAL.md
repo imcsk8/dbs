@@ -1,0 +1,371 @@
+# DBS (Distribution Build System) - Hands-On Tutorial
+
+Welcome to the hands-on tutorial for the **Distribution Build System (DBS)**. This guide provides a step-by-step walkthrough covering everything from initial compilation and dist-git repository exploration to hermetic Mock chroot builds and topological dependency orchestration using Kahn's algorithm.
+
+---
+
+## Table of Contents
+
+1. [Architecture & Concepts](#1-architecture--concepts)
+2. [Prerequisites & System Setup](#2-prerequisites--system-setup)
+3. [Building & Verifying DBS](#3-building--verifying-dbs)
+4. [Exploring Upstream Dist-Git Repositories](#4-exploring-upstream-dist-git-repositories)
+5. [Cloning, Re-branding, and Remote Management](#5-cloning-re-branding-and-remote-management)
+6. [Inspecting Package Metadata & Spec Files](#6-inspecting-package-metadata--spec-files)
+7. [Dependency Analysis with Kahn's DAG Engine](#7-dependency-analysis-with-kahns-dag-engine)
+8. [Hermetic Compilation with Mock](#8-hermetic-compilation-with-mock)
+9. [Automated Layered Build Pipeline](#9-automated-layered-build-pipeline)
+10. [Supply Chain Database Tracking (Optional)](#10-supply-chain-database-tracking-optional)
+11. [Troubleshooting & Best Practices](#11-troubleshooting--best-practices)
+
+---
+
+## 1. Architecture & Concepts
+
+Traditional Linux distribution build systems often rely on complex, brittle shell scripts or vendor-locked infrastructure. DBS replaces this with a modern, modular architecture written in Rust:
+
+```mermaid
+flowchart TD
+    Upstream[Upstream Dist-Git<br/>Fedora Rawhide / CentOS / TacOS] -->|dbs explore / clone| Workspace[Local Dist-Git Workspace<br/>data/distgit/]
+    Workspace -->|dbs distgit inspect| SpecEngine[Spec Parser & Capability Extractor]
+    SpecEngine -->|BuildRequires / Provides| DagEngine[Kahn DAG Engine<br/>Topological Layering]
+    DagEngine -->|Layer 0, Layer 1, ...| BuildRunner[Mock Runner Pool<br/>Hermetic Chroot Workers]
+    BuildRunner -->|RPM Artifacts| Staging[Staging Repository<br/>staging/RPMS/]
+    Staging -->|createrepo_c & --addrepo| BuildRunner
+    Staging -->|Optional --record-db| Database[(PostgreSQL Supply Chain Catalog)]
+```
+
+### Key Concepts
+* **Dist-Git:** A Git repository storing RPM `.spec` files, custom patches, and file metadata (`sources` file containing hashes for lookaside cache archives).
+* **Lookaside Cache:** An HTTP server storing large source tarballs referenced by dist-git repositories.
+* **Topological Layers (Kahn's Algorithm):** An in-degree BFS scheduling algorithm that partitions workspace packages into discrete, parallelizable compilation layers. Layer 0 packages have zero workspace dependencies; Layer $N+1$ packages only depend on packages compiled in earlier layers.
+* **Hermetic Mock Runner:** A build engine executing in isolated chroots (`/var/lib/mock/`) with clean package sets, preventing contamination between the host system and the build environment.
+* **Dynamic Local Repository Feedback:** As packages finish compiling, DBS automatically indexes the output RPMs using `createrepo_c` and passes `--addrepo=file://...` to subsequent Mock workers so downstream dependencies resolve seamlessly.
+
+---
+
+## 2. Prerequisites & System Setup
+
+Ensure your host system (Fedora, CentOS Stream, TacOS, or RHEL) has the necessary tools:
+
+```bash
+# Install packaging and build tools
+sudo dnf install -y rust cargo mock createrepo_c git
+
+# Grant your user permission to run Mock without sudo
+sudo usermod -a -G mock $USER
+
+# Apply the new group membership to the current shell
+newgrp mock
+```
+
+Verify that Mock functions properly:
+
+```bash
+mock --version
+```
+
+---
+
+## 3. Building & Verifying DBS
+
+Clone the DBS repository and compile the release binary:
+
+```bash
+git clone https://codeberg.org/imcsk8/dbs.git
+cd dbs
+
+# Compile the optimized release binary
+make release
+```
+
+The compiled binary will be placed at `./bin/dbs`. Verify the CLI:
+
+```bash
+./bin/dbs --help
+```
+
+You will see the main command options:
+* `explore`: Search packages across upstream dist-git platforms.
+* `distgit`: Clone, pull, sync, and inspect dist-git repositories.
+* `dag`: Analyze dependencies and compute topological build layers.
+* `build`: Compile packages using Mock or rpmbuild.
+* `os`: Manage operating system presets and database definitions.
+* `pkg`: Query packages in the PostgreSQL catalog.
+
+---
+
+## 4. Exploring Upstream Dist-Git Repositories
+
+DBS allows you to query dist-git platforms remotely using their native APIs (Pagure for Fedora, GitLab for CentOS Stream, Forgejo for TacOS/Codeberg).
+
+### Search Fedora Rawhide (Pagure API)
+
+```bash
+./bin/dbs explore --distro fedora-rawhide --search zstd
+```
+
+Output:
+```text
+=== Exploring distro: Fedora Rawhide (search: "zstd", limit: 25) ===
+Found 2 packages:
+  • zstd
+    Clone URL: https://src.fedoraproject.org/rpms/zstd.git
+  • zstd-jni
+    Clone URL: https://src.fedoraproject.org/rpms/zstd-jni.git
+```
+
+### Search CentOS Stream 10 (GitLab API)
+
+```bash
+./bin/dbs explore --distro centos-stream-10 --search python --limit 5
+```
+
+---
+
+## 5. Cloning, Re-branding, and Remote Management
+
+When maintaining a downstream distribution (like TacOS), you frequently need to clone packages from Fedora Rawhide, rename or rebrand them, and push them to your own Git forge (such as Codeberg or GitHub).
+
+### Scenario A: Direct Dist-Git Clone
+
+Clone the `zstd` package repository directly from Fedora Rawhide:
+
+```bash
+./bin/dbs distgit clone --distro fedora-rawhide zstd
+```
+
+This clones `https://src.fedoraproject.org/rpms/zstd.git` into `data/distgit/zstd`.
+
+### Scenario B: Clone and Retarget Remotes (`--new-origin`)
+
+When creating a package for your own distribution, point `origin` to your repository while keeping the upstream Fedora repository tracked as `upstream`:
+
+```bash
+./bin/dbs distgit clone --distro fedora-rawhide zstd \
+  --new-origin https://codeberg.org/imcsk8/tacos/zstd.git
+```
+
+Check the configured git remotes:
+
+```bash
+git -C data/distgit/zstd remote -v
+```
+
+Output:
+```text
+origin    https://codeberg.org/imcsk8/tacos/zstd.git (fetch)
+origin    https://codeberg.org/imcsk8/tacos/zstd.git (push)
+upstream  https://src.fedoraproject.org/rpms/zstd.git (fetch)
+upstream  https://src.fedoraproject.org/rpms/zstd.git (push)
+```
+
+### Scenario C: Re-branding a Package (`--as` and `--rename-spec`)
+
+To fork and rebrand an upstream package (e.g. `fedora-release` into `tacos-release`):
+
+```bash
+./bin/dbs distgit clone --distro fedora-rawhide fedora-release \
+  --as tacos-release \
+  --rename-spec \
+  --new-origin https://codeberg.org/imcsk8/tacos/tacos-release.git
+```
+
+This will:
+1. Clone `fedora-release` into `data/distgit/tacos-release`.
+2. Rename `fedora-release.spec` to `tacos-release.spec`.
+3. Set `origin` to `https://codeberg.org/imcsk8/tacos/tacos-release.git` and `upstream` to Fedora.
+
+---
+
+## 6. Inspecting Package Metadata & Spec Files
+
+DBS includes a native RPM `.spec` parser that extracts Package Name, Epoch, Version, Release, License, Sources, Patches, `BuildRequires`, and `Requires`.
+
+Inspect the cloned `zstd` package:
+
+```bash
+./bin/dbs distgit inspect data/distgit/zstd/zstd.spec
+```
+
+Sample output:
+```text
+=== Spec Metadata: zstd ===
+  File: data/distgit/zstd/zstd.spec
+  Version: 1.5.7, Release: 2%{?dist}
+  Summary: Zstandard - Fast real-time compression algorithm
+  License: BSD and GPLv2
+  Sources (1):
+    - https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+  Patches (0):
+  BuildRequires (7):
+    - /usr/bin/valgrind
+    - cmake
+    - gcc
+    - gtest-devel
+    - ninja-build
+    - pkgconfig(liblz4)
+    - pkgconfig(liblzma)
+  Requires (1):
+    - libzstd%{?_isa} = %{version}-%{release}
+```
+
+---
+
+## 7. Dependency Analysis with Kahn's DAG Engine
+
+When compiling multiple interdependent packages, you must determine the correct compilation order. DBS uses **Kahn's in-degree BFS algorithm** to group packages into parallel compilation layers.
+
+### Clone Multiple Interdependent Packages
+
+Clone a small set of interdependent packages:
+
+```bash
+./bin/dbs distgit clone --distro fedora-rawhide lz4 zstd xxhash
+```
+
+### Analyze the Dependency Graph
+
+Run the DAG solver over the `data/distgit` directory:
+
+```bash
+./bin/dbs dag -i data/distgit
+```
+
+Example output:
+```text
+Parsed 3 package spec files from "data/distgit".
+
+Topological Build Order (3 packages across 2 layers):
+
+  Layer 0 (2 packages - can build concurrently):
+    • lz4
+    • xxhash
+
+  Layer 1 (1 packages - can build concurrently):
+    • zstd (depends on: lz4)
+```
+
+### Generate a Markdown Dependency Report
+
+Export a comprehensive report documenting the build order and dependencies:
+
+```bash
+./bin/dbs dag -i data/distgit --report reports/dag_plan.md
+```
+
+Inspect `reports/dag_plan.md` to see:
+* Layer-by-layer build tables.
+* Full package dependency breakdown (`BuildRequires` vs. workspace providers).
+* Circular dependency diagnostics (if cycles exist, packages are flagged with their unresolved dependencies).
+
+---
+
+## 8. Hermetic Compilation with Mock
+
+Mock provides clean chroot environments using DNF/RPM. It isolates the build process from the host system.
+
+### Compiling a Single Package
+
+Compile `lz4` in the `fedora-rawhide-x86_64` Mock chroot:
+
+```bash
+./bin/dbs build -r fedora-rawhide-x86_64 -o staging data/distgit/lz4/lz4.spec
+```
+
+During this step, DBS will:
+1. Run `mock --buildsrpm` to produce a source RPM (`.src.rpm`).
+2. Run `mock --rebuild` inside the hermetic chroot.
+3. Extract generated binary RPMs (`.rpm`) and build logs (`build.log`, `root.log`) into `staging/RPMS/` and `staging/logs/`.
+4. Index `staging/RPMS/` using `createrepo_c`.
+
+### Inspecting Built Artifacts
+
+```bash
+ls -la staging/RPMS/
+ls -la staging/logs/
+```
+
+---
+
+## 9. Automated Layered Build Pipeline
+
+Instead of manually building each package, DBS can orchestrate the entire topological DAG automatically.
+
+### Running Layered Builds
+
+```bash
+./bin/dbs dag -i data/distgit --build -r fedora-rawhide-x86_64 -j 4 -o staging
+```
+
+### How the Layered Execution Works:
+1. **Layer 0 Execution:** `lz4` and `xxhash` have no intra-workspace dependencies. Mock workers build them concurrently up to the worker limit (`-j 4`).
+2. **Repository Re-Indexing:** Upon Layer 0 completion, DBS indexes `staging/RPMS/` with `createrepo_c`.
+3. **Layer 1 Execution:** `zstd` requires `lz4`. When compiling `zstd`, DBS passes `--addrepo=file://<abs_path>/staging/RPMS` to Mock. Mock installs the newly compiled `lz4-devel` RPM from Layer 0.
+4. **Completion:** All packages are hermetically built in exact dependency order with zero host contamination.
+
+---
+
+## 10. Supply Chain Database Tracking (Optional)
+
+DBS includes an optional relational database schema (backed by PostgreSQL and Diesel) for tracking operating systems, packages, source commits, capabilities, and build artifacts.
+
+### Start the Database Container
+
+```bash
+# Start the local PostgreSQL container
+make db
+
+# Apply Diesel database migrations
+make bootstrap
+```
+
+### Synchronize Packages and Record to Database
+
+```bash
+./bin/dbs distgit sync --distro fedora-rawhide --search zstd --limit 5 --record-db
+```
+
+### Query Database Records
+
+```bash
+# List tracked operating systems
+./bin/dbs os list
+
+# List recorded packages
+./bin/dbs pkg list
+```
+
+---
+
+## 11. Troubleshooting & Best Practices
+
+### Mock Permissions
+* **Issue:** `mock: error: Cannot find user in mock group`
+* **Solution:** Run `sudo usermod -a -G mock $USER` and open a new login shell or execute `newgrp mock`.
+
+### Clean Chroot Caches
+* If you want to reset Mock's chroot cache to ensure a fresh baseline:
+  ```bash
+  mock -r fedora-rawhide-x86_64 --clean
+  ```
+
+### Lookaside Tarballs
+* If a package requires external source archives not committed to Git, download them using `spectool` or run:
+  ```bash
+  ./bin/dbs distgit sync --distro fedora-rawhide --sources
+  ```
+
+### Workspace Cleanup
+* To clean staging directories and build artifacts:
+  ```bash
+  make clean
+  ```
+
+---
+
+## Next Steps
+
+* Explore [AGENTS.md](file:///home/imcsk8/projects/gemini-workdir/dbs/AGENTS.md) for technical architecture details and developer guidelines.
+* Check [README.md](file:///home/imcsk8/projects/gemini-workdir/dbs/README.md) for quick command references and project overview.
+* Review the source code in [`rust/src/main.rs`](file:///home/imcsk8/projects/gemini-workdir/dbs/rust/src/main.rs) and [`rust/src/dag/mod.rs`](file:///home/imcsk8/projects/gemini-workdir/dbs/rust/src/dag/mod.rs).
