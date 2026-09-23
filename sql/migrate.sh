@@ -3,6 +3,8 @@
 # Poor man's migration
 # Iván Chavero <ichavero@chavero.com.mx>
 
+set -xe
+
 if [[ ! -v DATABASE_URL ]]; then
     echo "Missing DATABASE_URL variable"
     exit
