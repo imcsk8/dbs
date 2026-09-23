@@ -5,6 +5,7 @@
 //! for worker orchestration, dynamic local repository feedback, and sequential chain builds.
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -144,21 +145,24 @@ impl MockRunner {
             let srpm_output = srpm_cmd.output()?;
             if !srpm_output.status.success() {
                 let duration_seconds = start_time.elapsed().as_secs_f64();
-                let log_content = format!(
-                    "=== STAGE 1: mock --buildsrpm FAILED ===\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                let runner_log_path = pkg_result_dir.join("dbs-runner.log");
+                let runner_log_content = format!(
+                    "=== DBS STAGE 1: mock --buildsrpm FAILED ===\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
                     String::from_utf8_lossy(&srpm_output.stdout),
                     String::from_utf8_lossy(&srpm_output.stderr)
                 );
-                let _ = fs::write(&log_path, log_content);
+                let _ = fs::write(&runner_log_path, &runner_log_content);
 
-                let stderr_str = String::from_utf8_lossy(&srpm_output.stderr);
-                let stdout_str = String::from_utf8_lossy(&srpm_output.stdout);
-                let combined = format!("{}\n{}", stdout_str, stderr_str);
-                let err_line = combined
-                    .lines()
-                    .find(|l| l.contains("error:") || l.contains("Bad file:") || l.contains("ERROR:"))
-                    .unwrap_or("Mock --buildsrpm failed to produce SRPM")
-                    .to_string();
+                // If Mock did not generate build.log, write runner output to build.log so log_path exists
+                if !log_path.exists() {
+                    let _ = fs::write(&log_path, &runner_log_content);
+                }
+
+                let error_summary = extract_error_summary(
+                    &log_path,
+                    &String::from_utf8_lossy(&srpm_output.stdout),
+                    &String::from_utf8_lossy(&srpm_output.stderr),
+                );
 
                 return Ok(BuildOutput {
                     target_name: pkg_stem.to_string(),
@@ -166,7 +170,7 @@ impl MockRunner {
                     duration_seconds,
                     log_path,
                     artifacts: Vec::new(),
-                    error_summary: Some(err_line),
+                    error_summary: Some(error_summary),
                 });
             }
 
@@ -208,24 +212,25 @@ impl MockRunner {
         let duration_seconds = start_time.elapsed().as_secs_f64();
         let success = rebuild_output.status.success();
 
-        let log_content = format!(
-            "=== STAGE 2: mock --rebuild ===\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+        // Write DBS wrapper stdout/stderr to dbs-runner.log for separate diagnosis
+        let runner_log_path = pkg_result_dir.join("dbs-runner.log");
+        let runner_log_content = format!(
+            "=== DBS STAGE 2: mock --rebuild ===\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
             String::from_utf8_lossy(&rebuild_output.stdout),
             String::from_utf8_lossy(&rebuild_output.stderr)
         );
-        let _ = fs::write(&log_path, log_content);
+        let _ = fs::write(&runner_log_path, &runner_log_content);
+
+        // Preserve Mock's detailed build.log if generated; otherwise fallback to runner log
+        if !log_path.exists() {
+            let _ = fs::write(&log_path, &runner_log_content);
+        }
 
         let artifacts = collect_artifacts(&pkg_result_dir);
         let error_summary = if !success {
-            let stderr_str = String::from_utf8_lossy(&rebuild_output.stderr);
             let stdout_str = String::from_utf8_lossy(&rebuild_output.stdout);
-            let combined = format!("{}\n{}", stdout_str, stderr_str);
-            let err_line = combined
-                .lines()
-                .find(|l| l.contains("error:") || l.contains("ERROR:") || l.contains("Failed:"))
-                .unwrap_or("Mock --rebuild process exited with failure")
-                .to_string();
-            Some(err_line)
+            let stderr_str = String::from_utf8_lossy(&rebuild_output.stderr);
+            Some(extract_error_summary(&log_path, &stdout_str, &stderr_str))
         } else {
             None
         };
@@ -328,8 +333,9 @@ impl MockRunner {
 
         let artifacts = collect_artifacts(&local_repo);
         let error_summary = if !success {
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stderr_str = String::from_utf8_lossy(&output.stderr);
-            Some(stderr_str.lines().last().unwrap_or("Mock chain build failed").to_string())
+            Some(extract_error_summary(&log_path, &stdout_str, &stderr_str))
         } else {
             None
         };
@@ -449,8 +455,9 @@ impl BuildRunner for RpmbuildRunner {
 
         let artifacts = collect_artifacts(result_dir);
         let error_summary = if !success {
+            let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stderr_str = String::from_utf8_lossy(&output.stderr);
-            Some(stderr_str.lines().last().unwrap_or("rpmbuild exited with failure").to_string())
+            Some(extract_error_summary(&log_path, &stdout_str, &stderr_str))
         } else {
             None
         };
@@ -493,6 +500,107 @@ pub fn update_local_repo(repo_dir: &Path) {
         .arg("--quiet")
         .arg(repo_dir)
         .status();
+}
+
+/// Reads up to `max_bytes` from the tail of a file, returning its lines.
+fn read_tail_lines(path: &Path, max_bytes: u64) -> std::io::Result<Vec<String>> {
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => return Err(e),
+    };
+    let metadata = match file.metadata() {
+        Ok(m) => m,
+        Err(e) => return Err(e),
+    };
+    let file_len = metadata.len();
+    let read_start = if file_len > max_bytes {
+        file_len - max_bytes
+    } else {
+        0
+    };
+
+    match file.seek(SeekFrom::Start(read_start)) {
+        Ok(_) => (),
+        Err(e) => return Err(e),
+    };
+
+    let mut buffer = String::new();
+    match file.read_to_string(&mut buffer) {
+        Ok(_) => (),
+        Err(e) => return Err(e),
+    };
+
+    Ok(buffer.lines().map(|s| s.to_string()).collect())
+}
+
+/// Extracts a concise, actionable error summary line from Mock's `build.log` or runner output.
+fn extract_error_summary(log_path: &Path, wrapper_stdout: &str, wrapper_stderr: &str) -> String {
+    if log_path.exists() {
+        if let Ok(lines) = read_tail_lines(log_path, 1024 * 1024) {
+            let mut bad_exit_phase = None;
+            let mut specific_cause = None;
+
+            for line in lines.iter().rev() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                // Detect rpmbuild phase failure, e.g. (%check), (%build), (%install)
+                if bad_exit_phase.is_none() && trimmed.contains("error: Bad exit status") {
+                    if let Some(phase_start) = trimmed.rfind("(%") {
+                        bad_exit_phase = Some(trimmed[phase_start..].trim_end_matches('.').to_string());
+                    } else {
+                        bad_exit_phase = Some(trimmed.to_string());
+                    }
+                    continue;
+                }
+
+                // Detect specific test failure, compiler error, or packaging error
+                if specific_cause.is_none() {
+                    if trimmed.starts_with("FAIL: ")
+                        || trimmed.starts_with("FAILED: ")
+                        || trimmed.contains(": fatal error: ")
+                        || trimmed.contains(": error: ")
+                        || (trimmed.starts_with("error: ") && !trimmed.contains("error: Bad exit status"))
+                        || (trimmed.contains("make: *** [") && trimmed.contains("Error"))
+                        || trimmed.contains("ninja: build stopped:")
+                        || trimmed.starts_with("CMake Error at")
+                    {
+                        specific_cause = Some(trimmed.to_string());
+                        if bad_exit_phase.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            match (bad_exit_phase, specific_cause) {
+                (Some(phase), Some(cause)) => return format!("{} [{}]", cause, phase),
+                (Some(phase), None) => return format!("rpmbuild failed at {}", phase),
+                (None, Some(cause)) => return cause,
+                (None, None) => {}
+            }
+        }
+    }
+
+    // Fall back to Mock CLI wrapper output
+    let combined = format!("{}\n{}", wrapper_stdout, wrapper_stderr);
+    for line in combined.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("ERROR: Command failed:") {
+            return trimmed.to_string();
+        }
+        if (trimmed.contains("error:") || trimmed.contains("ERROR:") || trimmed.contains("Failed:"))
+            && !trimmed.contains("Start:")
+            && !trimmed.contains("Finish:")
+            && !trimmed.contains("Cleaning up build root")
+        {
+            return trimmed.to_string();
+        }
+    }
+
+    "Mock process exited with failure".to_string()
 }
 
 /// Recursively discovers all generated `.rpm` and `.src.rpm` files within a directory.
@@ -693,5 +801,55 @@ mod tests {
         let srpm = dir.path().join("test-1.0-1.fc42.src.rpm");
         File::create(&srpm).unwrap();
         assert_eq!(find_srpm_in_dir(dir.path()), Some(srpm));
+    }
+
+    #[test]
+    fn test_extract_error_summary_check_failure() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("build.log");
+        let mock_log = "
+Building strace-7.2...
+Running tests...
+PASS: test_fork
+FAIL: test_vmsplice
+PASS: test_socket
+error: Bad exit status from /var/tmp/rpm-tmp.abc123 (%check)
+";
+        fs::write(&log_path, mock_log).unwrap();
+        let summary = extract_error_summary(&log_path, "", "ERROR: Command failed: rpmbuild");
+        assert_eq!(summary, "FAIL: test_vmsplice [(%check)]");
+    }
+
+    #[test]
+    fn test_extract_error_summary_compile_failure() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("build.log");
+        let mock_log = "
+gcc -O2 -c parser.c
+parser.c:42:10: fatal error: missing_header.h: No such file or directory
+make[1]: *** [Makefile:88: parser.o] Error 1
+error: Bad exit status from /var/tmp/rpm-tmp.xyz789 (%build)
+";
+        fs::write(&log_path, mock_log).unwrap();
+        let summary = extract_error_summary(&log_path, "", "ERROR: Exception");
+        assert_eq!(
+            summary,
+            "parser.c:42:10: fatal error: missing_header.h: No such file or directory [(%build)]"
+        );
+    }
+
+    #[test]
+    fn test_extract_error_summary_wrapper_fallback() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("non_existent_build.log");
+        let wrapper_stderr = "
+INFO: Mock Version: 6.8
+ERROR: Command failed: # /usr/bin/systemd-nspawn -D /root dnf install
+";
+        let summary = extract_error_summary(&log_path, "", wrapper_stderr);
+        assert_eq!(
+            summary,
+            "ERROR: Command failed: # /usr/bin/systemd-nspawn -D /root dnf install"
+        );
     }
 }
