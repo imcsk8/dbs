@@ -4,13 +4,14 @@
 //! inspecting, and building packages across any Linux distribution using dist-git.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use clap::Parser;
 use eyre::{eyre, Result};
 
 pub mod chroot;
 pub mod cli;
+pub mod config;
 pub mod dag;
 pub mod db;
 pub mod distgit;
@@ -21,7 +22,8 @@ pub mod runner;
 pub mod schema;
 pub mod types;
 
-use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
+use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, ConfigArgs, ConfigCommands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
+use config::DbsConfig;
 use dag::DependencyGraph;
 use distgit::provider::DistroConfig;
 use distgit::spec::{parse_spec_file, SpecMetadata};
@@ -33,18 +35,28 @@ use runner::{BuildOutput, BuildRunner, MockRunner, RpmbuildRunner};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let (dbs_cfg, loaded_path) = DbsConfig::load(cli.config.as_deref())?;
+
+    if cli.verbose {
+        if let Some(ref p) = loaded_path {
+            println!("[CONFIG] Loaded configuration from: {}", p.display());
+        } else {
+            println!("[CONFIG] Using default configuration (no config file found)");
+        }
+    }
 
     match cli.command {
         Commands::Explore(args) => handle_explore(args).await?,
-        Commands::Distgit(args) => handle_distgit(args).await?,
-        Commands::Build(args) => handle_build(args).await?,
-        Commands::Os(args) => handle_os(args).await?,
-        Commands::Pkg(args) => handle_pkg(args).await?,
-        Commands::Dag(args) => handle_dag(args).await?,
-        Commands::Chroot(args) => handle_chroot(args).await?,
-        Commands::Lookaside(args) => handle_lookaside(args).await?,
-        Commands::Distro(args) => handle_distro(args).await?,
-        Commands::Db(args) => handle_db(args).await?,
+        Commands::Distgit(args) => handle_distgit(args, &dbs_cfg).await?,
+        Commands::Build(args) => handle_build(args, &dbs_cfg).await?,
+        Commands::Os(args) => handle_os(args, &dbs_cfg).await?,
+        Commands::Pkg(args) => handle_pkg(args, &dbs_cfg).await?,
+        Commands::Dag(args) => handle_dag(args, &dbs_cfg).await?,
+        Commands::Chroot(args) => handle_chroot(args, &dbs_cfg).await?,
+        Commands::Lookaside(args) => handle_lookaside(args, &dbs_cfg).await?,
+        Commands::Distro(args) => handle_distro(args, &dbs_cfg).await?,
+        Commands::Db(args) => handle_db(args, &dbs_cfg).await?,
+        Commands::Config(args) => handle_config(args, &dbs_cfg, loaded_path.as_deref()).await?,
     }
 
     Ok(())
@@ -99,9 +111,11 @@ async fn handle_explore(args: ExploreArgs) -> Result<()> {
 }
 
 /// Dispatches the `distgit` subcommand for cloning, pulling, syncing, and inspecting.
-async fn handle_distgit(args: DistgitArgs) -> Result<()> {
+async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
         DistgitCommands::Clone { distro, dest, rename_as, rename_spec, new_origin, packages } => {
+            let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
             let config = DistroConfig::from_preset(&distro)
                 .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
             let client = DistGitClient::new(config);
@@ -142,6 +156,7 @@ async fn handle_distgit(args: DistgitArgs) -> Result<()> {
         }
 
         DistgitCommands::Pull { dest, packages } => {
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
             let pkgs_to_pull = if packages.is_empty() {
                 let mut found = Vec::new();
                 if let Ok(entries) = fs::read_dir(&dest) {
@@ -179,6 +194,12 @@ async fn handle_distgit(args: DistgitArgs) -> Result<()> {
         }
 
         DistgitCommands::Sync { distro, dest, concurrency, sources, search, limit, record_db, lookaside_dir } => {
+            let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
+            let concurrency = concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
+            let lookaside_dir = lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
+            let record_db = record_db || dbs_cfg.database.record_db;
+
             let config = DistroConfig::from_preset(&distro)
                 .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
             let client = Arc::new(DistGitClient::new(config));
@@ -192,7 +213,7 @@ async fn handle_distgit(args: DistgitArgs) -> Result<()> {
             }
 
             let mut db_conn = if record_db {
-                match db::establish_connection() {
+                match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
                     Ok(conn) => {
                         println!("✓ Connected to database for package catalog synchronization.");
                         Some(conn)
@@ -267,21 +288,27 @@ async fn handle_distgit(args: DistgitArgs) -> Result<()> {
 }
 
 /// Dispatches the `build` subcommand.
-async fn handle_build(args: BuildArgs) -> Result<()> {
+async fn handle_build(args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    let output_dir = args.output_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+    let concurrency = args.concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
+    let mock_root = args.mock_root.or_else(|| Some(dbs_cfg.chroot.profile.clone()));
+    let lookaside_dir = args.lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
+    let record_db = args.record_db || dbs_cfg.database.record_db;
+
     println!("===========================================================");
     println!(" DBS Package Build Orchestrator");
     println!(" Runner:       {}", args.runner);
-    println!(" Staging:      {}", args.output_dir.display());
+    println!(" Staging:      {}", output_dir.display());
     println!(" Targets:      {}", args.targets.len());
-    println!(" Concurrency:  {} workers", args.concurrency);
+    println!(" Concurrency:  {} workers", concurrency);
     println!(" Dynamic Repo: {}", args.dynamic_repo);
-    if args.record_db {
+    if record_db {
         println!(" Record to DB: enabled");
     }
     println!("===========================================================");
 
-    let mut db_conn = if args.record_db {
-        match db::establish_connection() {
+    let mut db_conn = if record_db {
+        match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
             Ok(conn) => {
                 println!("✓ Connected to database for build metrics recording.");
                 Some(conn)
@@ -301,16 +328,16 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
             if !target.to_string_lossy().ends_with(".src.rpm") {
                 let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                 let sources_dir = runner::resolve_sources_dir(target);
-                runner::ensure_sources_present(target, &sources_dir, pkg_stem, args.lookaside_dir.as_deref());
+                runner::ensure_sources_present(target, &sources_dir, pkg_stem, lookaside_dir.as_deref());
             }
         }
     }
 
     match args.runner.to_lowercase().as_str() {
         "mock" => {
-            let chroot_spec = args.mock_root.unwrap_or_else(|| "fedora-rawhide-x86_64".to_string());
-            let mut runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir)?;
-            if let Some(l_dir) = args.lookaside_dir {
+            let chroot_spec = mock_root.unwrap_or_else(|| "tacos-rolling-x86_64".to_string());
+            let mut runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
+            if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
             }
             println!(" Chroot Profile: {}", runner.root_name);
@@ -323,7 +350,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
 
             if args.chain {
                 println!("Executing sequential Mock chain build for {} package(s)...", args.targets.len());
-                let out = runner.build_chain(&args.targets, &args.output_dir, args.continue_on_error)?;
+                let out = runner.build_chain(&args.targets, &output_dir, args.continue_on_error)?;
                 print_build_output(&out);
                 if let Some(conn) = &mut db_conn {
                     for target in &args.targets {
@@ -331,10 +358,10 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
                         let _ = db::record_build_result(conn, name, &out);
                     }
                 }
-            } else if args.targets.len() == 1 || args.concurrency == 1 {
+            } else if args.targets.len() == 1 || concurrency == 1 {
                 for target in &args.targets {
                     println!("\nBuilding {} in Mock...", target.display());
-                    let out = runner.build(target, &args.output_dir)?;
+                    let out = runner.build(target, &output_dir)?;
                     print_build_output(&out);
                     if let Some(conn) = &mut db_conn {
                         let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
@@ -342,10 +369,10 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
                     }
                 }
             } else {
-                println!("Launching {} parallel Mock workers with dynamic local repo feedback...", args.concurrency);
+                println!("Launching {} parallel Mock workers with dynamic local repo feedback...", concurrency);
                 let runner = Arc::new(runner);
                 let results = runner
-                    .build_parallel(args.targets.clone(), args.output_dir.clone(), args.concurrency, args.dynamic_repo)
+                    .build_parallel(args.targets.clone(), output_dir.clone(), concurrency, args.dynamic_repo)
                     .await;
 
                 for (idx, res) in results.into_iter().enumerate() {
@@ -369,7 +396,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
             let runner = RpmbuildRunner;
             for target in &args.targets {
                 println!("\nBuilding {} on host with rpmbuild...", target.display());
-                let out = runner.build(target, &args.output_dir)?;
+                let out = runner.build(target, &output_dir)?;
                 print_build_output(&out);
                 if let Some(conn) = &mut db_conn {
                     let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
@@ -387,7 +414,7 @@ async fn handle_build(args: BuildArgs) -> Result<()> {
 }
 
 /// Dispatches the `os` subcommand.
-async fn handle_os(args: OsArgs) -> Result<()> {
+async fn handle_os(args: OsArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
         cli::os::OsCommands::List => {
             println!("===========================================================");
@@ -405,7 +432,7 @@ async fn handle_os(args: OsArgs) -> Result<()> {
             }
             println!("===========================================================");
 
-            match db::establish_connection() {
+            match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
                 Ok(mut conn) => {
                     let _ = cli::os_actions::list(&mut conn);
                 }
@@ -415,15 +442,15 @@ async fn handle_os(args: OsArgs) -> Result<()> {
             }
         }
         cli::os::OsCommands::Add(add_args) => {
-            let mut conn = db::establish_connection()?;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::os_actions::add(&mut conn, &add_args)?;
         }
         cli::os::OsCommands::Delete { id } => {
-            let mut conn = db::establish_connection()?;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::os_actions::delete(&mut conn, id)?;
         }
         cli::os::OsCommands::AddPackage(pkg_args) => {
-            let mut conn = db::establish_connection()?;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::os_actions::add_package(&mut conn, &pkg_args)?;
         }
         cli::os::OsCommands::Update(_) => {
@@ -437,18 +464,18 @@ async fn handle_os(args: OsArgs) -> Result<()> {
 }
 
 /// Dispatches the `pkg` subcommand.
-async fn handle_pkg(args: PkgArgs) -> Result<()> {
+async fn handle_pkg(args: PkgArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
         cli::pkg::PkgCommands::List => {
-            let mut conn = db::establish_connection()?;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::pkg::list(&mut conn, 50)?;
         }
         cli::pkg::PkgCommands::Add(add_args) => {
-            let mut conn = db::establish_connection()?;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::pkg::add(&mut conn, &add_args)?;
         }
         cli::pkg::PkgCommands::Delete { id } => {
-            let mut conn = db::establish_connection()?;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::pkg::delete(&mut conn, id)?;
         }
         cli::pkg::PkgCommands::Update(_) => {
@@ -508,20 +535,27 @@ fn print_build_output(out: &BuildOutput) {
 }
 
 /// Dispatches the `dag` subcommand to compute topological build layers and optionally execute builds.
-async fn handle_dag(args: DagArgs) -> Result<()> {
+async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    let path = args.path.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
+    let output_dir = args.output_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+    let mock_root = args.mock_root.or_else(|| Some(dbs_cfg.chroot.profile.clone()));
+    let concurrency = args.concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
+    let lookaside_dir = args.lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
+    let record_db = args.record_db || dbs_cfg.database.record_db;
+
     println!("===========================================================");
     println!(" DBS Topological Dependency Graph (DAG) Resolution");
-    println!(" Repository/Spec Root: {}", args.path.display());
+    println!(" Repository/Spec Root: {}", path.display());
     println!("===========================================================");
 
     let mut graph = DependencyGraph::new();
-    let loaded = match graph.load_from_dir(&args.path) {
+    let loaded = match graph.load_from_dir(&path) {
         Ok(count) => count,
-        Err(e) => return Err(eyre!("Failed loading packages from {}: {}", args.path.display(), e)),
+        Err(e) => return Err(eyre!("Failed loading packages from {}: {}", path.display(), e)),
     };
 
     if loaded == 0 {
-        println!("No package .spec files found in {}", args.path.display());
+        println!("No package .spec files found in {}", path.display());
         return Ok(());
     }
 
@@ -544,7 +578,7 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
     if let Some(report_path) = &args.report {
         let mut report = String::new();
         report.push_str("# DBS Dependency Graph & Compilation Order\n\n");
-        report.push_str(&format!("* **Source Directory:** `{}`\n", args.path.display()));
+        report.push_str(&format!("* **Source Directory:** `{}`\n", path.display()));
         report.push_str(&format!("* **Total Packages:** {}\n", graph.packages.len()));
         report.push_str(&format!("* **Total Dependency Edges:** {}\n", total_edges));
         report.push_str(&format!("* **Compilation Layers:** {}\n\n", layers.len()));
@@ -567,9 +601,9 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
     }
 
     if args.fetch_sources {
-        let lookaside_mgr = LookasideManager::resolve_default(args.lookaside_dir.as_deref());
-        println!("\n▶ Synchronizing source archives into lookaside cache ({}) for packages in {}...", lookaside_mgr.root.display(), args.path.display());
-        match lookaside_mgr.sync_dir(&args.path, args.concurrency).await {
+        let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
+        println!("\n▶ Synchronizing source archives into lookaside cache ({}) for packages in {}...", lookaside_mgr.root.display(), path.display());
+        match lookaside_mgr.sync_dir(&path, concurrency).await {
             Ok(report) => {
                 if report.total_sources_found > 0 {
                     println!("✓ Lookaside synchronization: {} already cached, {} downloaded, {} failed (total: {})",
@@ -584,9 +618,9 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
 
     if args.build {
         println!("\nExecuting layered build orchestration with runner '{}'...", args.runner);
-        let chroot_spec = args.mock_root.unwrap_or_else(|| "fedora-rawhide-x86_64".to_string());
-        let mut mock_runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir)?;
-        if let Some(l_dir) = args.lookaside_dir {
+        let chroot_spec = mock_root.unwrap_or_else(|| "tacos-rolling-x86_64".to_string());
+        let mut mock_runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
+        if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
         }
         println!(" Chroot Profile: {}", mock_runner.root_name);
@@ -598,8 +632,8 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
         }
         let runner_arc = Arc::new(mock_runner);
 
-        let mut db_conn = if args.record_db {
-            match db::establish_connection() {
+        let mut db_conn = if record_db {
+            match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
                 Ok(conn) => {
                     println!("✓ Connected to database for DAG build recording.");
                     Some(conn)
@@ -631,7 +665,7 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
                 println!("Building {} package(s) in parallel...", targets.len());
                 let results = runner_arc
                     .clone()
-                    .build_parallel(targets.clone(), args.output_dir.clone(), args.concurrency, args.dynamic_repo)
+                    .build_parallel(targets.clone(), output_dir.clone(), concurrency, args.dynamic_repo)
                     .await;
 
                 for (idx, res) in results.into_iter().enumerate() {
@@ -656,9 +690,10 @@ async fn handle_dag(args: DagArgs) -> Result<()> {
 }
 
 /// Dispatches the `chroot` subcommand to list, inspect, check, add, or init Mock configurations.
-async fn handle_chroot(args: ChrootArgs) -> Result<()> {
+async fn handle_chroot(args: ChrootArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
         ChrootCommands::List { dir, all } => {
+            let dir = dir.or_else(|| dbs_cfg.chroot.config_dir.clone());
             println!("===========================================================");
             println!(" DBS Discovered Mock Chroot Configurations");
             if let Some(custom) = &dir {
@@ -701,6 +736,8 @@ async fn handle_chroot(args: ChrootArgs) -> Result<()> {
         }
 
         ChrootCommands::Inspect { target, dir } => {
+            let target = target.unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+            let dir = dir.or_else(|| dbs_cfg.chroot.config_dir.clone());
             let resolved = match chroot::ChrootResolver::resolve(&target, dir.as_deref()) {
                 Ok(r) => r,
                 Err(e) => return Err(eyre!("Failed to resolve chroot '{}': {}", target, e)),
@@ -736,6 +773,8 @@ async fn handle_chroot(args: ChrootArgs) -> Result<()> {
         }
 
         ChrootCommands::Check { target, dir } => {
+            let target = target.unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+            let dir = dir.or_else(|| dbs_cfg.chroot.config_dir.clone());
             println!("===========================================================");
             println!(" Testing Mock Chroot Configuration: {}", target);
             println!("===========================================================");
@@ -804,8 +843,9 @@ async fn handle_chroot(args: ChrootArgs) -> Result<()> {
 }
 
 /// Dispatches the `lookaside` subcommand for managing source archive storage and synchronization.
-async fn handle_lookaside(args: LookasideArgs) -> Result<()> {
-    let mgr = LookasideManager::resolve_default(args.dir.as_deref());
+async fn handle_lookaside(args: LookasideArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    let dir = args.dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
+    let mgr = LookasideManager::resolve_default(dir.as_deref());
 
     match args.command {
         LookasideCommands::Upload { file, pkg, spec, no_sources } => {
@@ -908,7 +948,7 @@ async fn handle_lookaside(args: LookasideArgs) -> Result<()> {
 }
 
 /// Dispatches the `distro` subcommand to manage, build, publish, and serve distribution repositories.
-async fn handle_distro(args: DistroArgs) -> Result<()> {
+async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.action {
         DistroCommands::Init {
             name,
@@ -919,6 +959,11 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
             dest,
             mock_dir,
         } => {
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
+            let mock_dir = mock_dir
+                .or_else(|| dbs_cfg.chroot.config_dir.clone())
+                .unwrap_or_else(|| PathBuf::from("mock"));
+
             println!("===========================================================");
             println!(" DBS Distribution Repository Initialization");
             println!(" Target Distribution: {}", name);
@@ -961,6 +1006,19 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
             sign_key,
             record_db,
         } => {
+            let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
+            let path = path.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
+            let mock_root = mock_root
+                .or_else(|| dbs_cfg.distro.chroot.clone())
+                .unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+            let mock_config_dir = mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone());
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
+            let lookaside_dir = lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
+            let concurrency = concurrency.unwrap_or(dbs_cfg.distro.workers);
+            let staging_dir = staging_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+            let sign_key = sign_key.or_else(|| dbs_cfg.distro.sign_key.clone());
+            let record_db = record_db || dbs_cfg.database.record_db;
+
             println!("===========================================================");
             println!(" DBS Distribution Build Orchestration");
             println!(" Target Distribution: {}", name);
@@ -992,15 +1050,14 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
             println!("✓ Loaded {} packages across {} compilation layers.", graph.packages.len(), layers.len());
 
             // 3. Setup runner
-            let chroot_name = mock_root.unwrap_or_else(|| name.clone());
-            let mut mock_runner = MockRunner::resolve(&chroot_name, mock_config_dir)?;
+            let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }
             let runner_arc = Arc::new(mock_runner);
 
             let mut db_conn = if record_db {
-                db::establish_connection().ok()
+                db::establish_connection_with_url(dbs_cfg.database.url.as_deref()).ok()
             } else {
                 None
             };
@@ -1049,8 +1106,8 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
                 name: name.clone(),
                 staging_dir,
                 dest_root: dest.clone(),
-                arch: "x86_64".to_string(),
-                base_url: "http://repos.tacos.org.mx".to_string(),
+                arch: dbs_cfg.distro.arch.clone(),
+                base_url: dbs_cfg.distro.base_url.clone(),
                 sign_key,
                 workers: concurrency,
             };
@@ -1075,6 +1132,14 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
             sign_key,
             workers,
         } => {
+            let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
+            let staging_dir = staging_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
+            let arch = arch.unwrap_or_else(|| dbs_cfg.distro.arch.clone());
+            let base_url = base_url.unwrap_or_else(|| dbs_cfg.distro.base_url.clone());
+            let sign_key = sign_key.or_else(|| dbs_cfg.distro.sign_key.clone());
+            let workers = workers.unwrap_or(dbs_cfg.distro.workers);
+
             println!("===========================================================");
             println!(" DBS Distribution Repository Publishing");
             println!(" Distribution:        {}", name);
@@ -1112,6 +1177,11 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
             port,
             host,
         } => {
+            let path = path.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
+            let server_name = server_name.unwrap_or_else(|| dbs_cfg.distro.server_name.clone());
+            let port = port.unwrap_or(dbs_cfg.distro.server_port);
+            let host = host.unwrap_or_else(|| dbs_cfg.distro.server_host.clone());
+
             if let Some(out_conf) = nginx_conf {
                 println!("Generating Nginx virtual host configuration...");
                 let content = generate_nginx_config(&path, &server_name, port);
@@ -1131,6 +1201,10 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
         }
 
         DistroCommands::Status { name, dest, arch } => {
+            let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
+            let dest = dest.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
+            let arch = arch.unwrap_or_else(|| dbs_cfg.distro.arch.clone());
+
             println!("===========================================================");
             println!(" DBS Distribution Repository Status: {}", name);
             println!("===========================================================");
@@ -1153,7 +1227,7 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
 }
 
 /// Dispatches the `db` subcommand for database bootstrapping, status check, reset, and dumping schema.
-async fn handle_db(args: DbArgs) -> Result<()> {
+async fn handle_db(args: DbArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
         DbCommands::DumpSchema { down } => {
             let sql = db::bootstrap::dump_schema(down);
@@ -1163,7 +1237,8 @@ async fn handle_db(args: DbArgs) -> Result<()> {
         _ => {}
     }
 
-    let mut conn = db::establish_connection_with_url(args.database_url.as_deref())?;
+    let db_url = args.database_url.as_deref().or(dbs_cfg.database.url.as_deref());
+    let mut conn = db::establish_connection_with_url(db_url)?;
 
     match args.command {
         DbCommands::Bootstrap { force } => {
@@ -1220,6 +1295,44 @@ async fn handle_db(args: DbArgs) -> Result<()> {
         }
 
         DbCommands::DumpSchema { .. } => unreachable!(),
+    }
+
+    Ok(())
+}
+
+/// Dispatches the `config` subcommand to view resolved configuration or initialize a new dbs.toml.
+async fn handle_config(args: ConfigArgs, dbs_cfg: &DbsConfig, loaded_path: Option<&Path>) -> Result<()> {
+    match args.command {
+        ConfigCommands::Show => {
+            println!("===========================================================");
+            println!(" DBS Configuration Settings");
+            if let Some(p) = loaded_path {
+                println!(" Loaded from: {}", p.display());
+            } else {
+                println!(" Loaded from: Default settings (no file loaded)");
+            }
+            println!("===========================================================\n");
+            let toml_str = toml::to_string_pretty(dbs_cfg)
+                .map_err(|e| eyre!("Failed to serialize configuration to TOML: {}", e))?;
+            println!("{}", toml_str);
+        }
+        ConfigCommands::Init { output, force } => {
+            if output.exists() && !force {
+                return Err(eyre!(
+                    "Target configuration file '{}' already exists. Use '--force' to overwrite.",
+                    output.display()
+                ));
+            }
+            if let Some(parent) = output.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            let sample = DbsConfig::sample_toml();
+            fs::write(&output, sample)?;
+            println!("✓ Successfully generated DBS configuration file at: {}", output.display());
+            println!("Edit this file to customize your database, chroot, distgit, and distro options.");
+        }
     }
 
     Ok(())

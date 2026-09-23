@@ -82,7 +82,37 @@ The optimized release binary is located at `./bin/dbs`. Verify installation:
 ./bin/dbs --help
 ```
 
-### 3. Explore Remote Packages
+### 3. Declarative Configuration (`dbs.toml`)
+
+DBS eliminates long lists of command-line flags by providing a unified, declarative **TOML** configuration file.
+
+Generate a starter configuration file with:
+
+```bash
+./bin/dbs config init
+```
+
+DBS automatically searches for configuration in standard locations:
+1. `--config <path>` / `-c <path>` (explicit command-line flag)
+2. `./dbs.toml` or `../dbs.toml`
+3. `~/.config/dbs/dbs.toml`
+4. `/etc/dbs/dbs.toml`
+
+View the active resolved configuration and loaded file path:
+
+```bash
+./bin/dbs config show
+```
+
+The configuration defines four core sections:
+* `[database]`: PostgreSQL connection URL and metric auto-recording flags.
+* `[chroot]`: Mock chroot profile (`profile`), config directories, target architecture, and compilation SMP CPU flags.
+* `[distgit]`: Upstream distribution preset (`distro`), repository destination path (`dest`), lookaside cache path, and concurrency.
+* `[distro]`: Target distribution name, chroot, root destination, staging directory, base URL, GPG signing key, workers, and HTTP server settings.
+
+Command-line arguments always override configuration file settings, which in turn override built-in defaults.
+
+### 4. Explore Remote Packages
 
 Search for packages across Fedora Rawhide or CentOS Stream without leaving your terminal:
 
@@ -94,7 +124,7 @@ Search for packages across Fedora Rawhide or CentOS Stream without leaving your 
 ./bin/dbs explore --distro centos-stream-10 --search python
 ```
 
-### 4. Clone Dist-Git Repositories
+### 5. Clone Dist-Git Repositories
 
 Clone upstream package sources and configure your distribution's remote:
 
@@ -108,7 +138,7 @@ Clone upstream package sources and configure your distribution's remote:
   --as tacos-release --rename-spec
 ```
 
-### 5. Analyze Dependencies & Compilation Layers (DAG)
+### 6. Analyze Dependencies & Compilation Layers (DAG)
 
 Inspect package `.spec` files and calculate parallel compilation layers:
 
@@ -120,7 +150,7 @@ Inspect package `.spec` files and calculate parallel compilation layers:
 ./bin/dbs dag -i data/distgit --report reports/dependency_layers.md
 ```
 
-### 6. Build in Mock
+### 7. Build in Mock
 
 Compile packages in isolated chroots:
 
@@ -132,7 +162,7 @@ Compile packages in isolated chroots:
 ./bin/dbs dag -i data/distgit --build -r fedora-rawhide-x86_64 -j 4 -o staging
 ```
 
-### 7. Manage Lookaside Cache (BTRFS CoW)
+### 8. Manage Lookaside Cache (BTRFS CoW)
 
 Store, verify, and maintain source tarballs with zero-disk BTRFS reflinks:
 
@@ -150,7 +180,7 @@ Store, verify, and maintain source tarballs with zero-disk BTRFS reflinks:
 ./bin/dbs lookaside gc --dry-run
 ```
 
-### 8. Build & Publish Complete Distribution Repositories
+### 9. Build & Publish Complete Distribution Repositories
 
 Automate end-to-end repository initialization, DAG compilation, repodata indexing, GPG signing, and web serving:
 
@@ -174,6 +204,7 @@ Automate end-to-end repository initialization, DAG compilation, repodata indexin
 
 | Command | Subcommand / Options | Description |
 | :--- | :--- | :--- |
+| `dbs config` | `show`, `init` | Display resolved settings or generate a starter `dbs.toml` configuration template. |
 | `dbs distro` | `init`, `build`, `publish`, `serve`, `status` | End-to-end distribution repository lifecycle: initialization, DAG build, publication, GPG signing, and HTTP/Nginx serving. |
 | `dbs explore` | `--distro`, `--search`, `--limit` | Search remote packages across Pagure, GitLab, or Forgejo APIs. |
 | `dbs distgit clone` | `--distro`, `--as`, `--rename-spec`, `--new-origin` | Clone dist-git repositories with optional renaming and remote setup. |
@@ -187,6 +218,7 @@ Automate end-to-end repository initialization, DAG compilation, repodata indexin
 | `dbs db` | `bootstrap`, `status`, `reset`, `dump-schema` | Bootstrap embedded database schema, inspect table health, reset, or export raw SQL. |
 | `dbs os` | `list`, `add`, `delete` | Manage operating system distribution definitions and presets. |
 | `dbs pkg` | `list`, `add`, `delete` | Query and manage packages in the PostgreSQL supply chain catalog. |
+| **Global Flags** | `-c, --config <PATH>`, `-v, --verbose` | Specify custom TOML configuration file and toggle verbose debugging logs. |
 
 ---
 

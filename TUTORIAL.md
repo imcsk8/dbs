@@ -86,12 +86,43 @@ The compiled binary will be placed at `./bin/dbs`. Verify the CLI:
 ```
 
 You will see the main command options:
+* `config`: View resolved settings and initialize starter configuration files.
 * `explore`: Search packages across upstream dist-git platforms.
 * `distgit`: Clone, pull, sync, and inspect dist-git repositories.
 * `dag`: Analyze dependencies and compute topological build layers.
 * `build`: Compile packages using Mock or rpmbuild.
+* `distro`: Complete distribution repository lifecycle (init, build, publish, serve).
+* `chroot`: Manage Mock chroot profiles and environments.
+* `lookaside`: Maintain source archives with BTRFS CoW reflinks.
+* `db`: Manage PostgreSQL supply chain tracking and migrations.
 * `os`: Manage operating system presets and database definitions.
 * `pkg`: Query packages in the PostgreSQL catalog.
+
+### Initializing Declarative Configuration (`dbs.toml`)
+
+Instead of passing dozens of flags (`-r`, `-o`, `-j`, `--distro`, `--dest`, `--staging-dir`) on every command, DBS provides a unified **TOML** configuration file.
+
+Generate a starter configuration:
+
+```bash
+# Generate starter dbs.toml in the current directory
+./bin/dbs config init
+
+# View the active configuration and loaded file path
+./bin/dbs config show
+```
+
+The configuration defines four core subsystem sections:
+* `[database]`: PostgreSQL URL (`postgres://...`) and metric recording flags (`record_db = false`).
+* `[chroot]`: Default chroot profile (`profile = "tacos-rolling-x86_64"`), search paths, architecture (`x86_64`), and SMP CPU flags (`smp_cpus = 2`).
+* `[distgit]`: Default upstream distribution (`distro = "fedora-rawhide"`), workspace destination (`dest = "/srv/dbs/tacos/rpm"`), lookaside directory (`lookaside_dir = "/srv/dbs/lookaside"`), and concurrency.
+* `[distro]`: Target distribution name (`name = "tacos-stable-x86_64"`), destination repo path (`dest = "/srv/dbs/tacos/distro"`), staging directory, signing key, and HTTP repository server options.
+
+You can explicitly point DBS to any configuration file using the global `--config` (`-c`) flag:
+
+```bash
+./bin/dbs --config /etc/dbs/dbs.toml distro status
+```
 
 ---
 

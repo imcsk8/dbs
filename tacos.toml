@@ -1,0 +1,70 @@
+# ==============================================================================
+# Distribution Build System (DBS) Configuration
+# ==============================================================================
+
+[database]
+# PostgreSQL connection string (overrides .env)
+url = "postgres://dbs:prueba123@127.0.0.1:9436/dbs"
+
+# Automatically record package synchronizations and build metrics in PostgreSQL
+record_db = false
+
+[chroot]
+# Default chroot profile name or path (in mock/ or ../mock/)
+profile = "tacos-stable-x86_64"
+
+# Additional directories searched for chroot .cfg profiles and templates
+search_paths = [
+    "mock_test",
+]
+
+# Default compilation architecture
+arch = "x86_64"
+
+# Max SMP CPUs passed to Mock chroot (%_smp_build_ncpus)
+smp_cpus = 2
+
+[distgit]
+# Default upstream distribution preset (e.g. fedora-rawhide, centos-stream-10, tacos)
+distro = "fedora-rawhide"
+
+# Destination directory for cloned dist-git package repositories
+dest = "/srv/dbs/tacos/rpm"
+
+# Dist-git lookaside source cache directory (BTRFS CoW)
+lookaside_dir = "/srv/dbs/lookaside"
+
+# Parallel concurrency for git clone and synchronization
+concurrency = 4
+
+[distro]
+# Target distribution identifier
+name = "tacos-stable-x86_64"
+
+# Specific chroot profile for distribution builds (defaults to chroot.profile if unset)
+chroot = "tacos-stable-x86_64"
+
+# Root repository destination directory for published RPMs and repodata
+dest = "/srv/dbs/tacos/distro"
+
+# Temporary staging directory for worker build logs and artifacts
+staging_dir = "/srv/dbs/tacos/staging"
+
+# Target distribution architecture
+arch = "x86_64"
+
+# Base URL written into client .repo repository configuration files
+base_url = "http://repos.tacos.org.mx"
+
+# Optional GPG key ID or email to sign RPMs and repomd.xml
+# sign_key = "security@tacos.org.mx"
+
+# Concurrency for createrepo_c metadata generation
+workers = 4
+
+# Domain name for generated Nginx virtual hosts
+server_name = "repos.tacos.org.mx"
+
+# Built-in HTTP repository server bind address and port
+server_host = "0.0.0.0"
+server_port = 8080

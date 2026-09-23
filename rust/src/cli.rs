@@ -19,6 +19,10 @@ use crate::cli::pkg::PkgCommands;
                   from dist-git repositories with pluggable build runners (Mock, rpmbuild, containers)."
 )]
 pub struct Cli {
+    /// Path to TOML configuration file (e.g. dbs.toml).
+    #[arg(short = 'c', long = "config", global = true)]
+    pub config: Option<PathBuf>,
+
     /// Verbose logging output.
     #[arg(short, long, global = true)]
     pub verbose: bool,
@@ -59,6 +63,9 @@ pub enum Commands {
 
     /// Manage database lifecycle, schema bootstrap, status, reset, and SQL schema dumps.
     Db(DbArgs),
+
+    /// Manage, view, and initialize DBS TOML configuration files.
+    Config(ConfigArgs),
 }
 
 /// Arguments for the `explore` subcommand.
@@ -88,13 +95,13 @@ pub struct DistgitArgs {
 pub enum DistgitCommands {
     /// Clone specific dist-git package repositories.
     Clone {
-        /// Distribution preset to clone from.
-        #[arg(short, long, default_value = "fedora-rawhide")]
-        distro: String,
+        /// Distribution preset to clone from (defaults to [distgit].distro in dbs.toml).
+        #[arg(short, long)]
+        distro: Option<String>,
 
-        /// Destination directory for cloned repositories.
-        #[arg(short = 'o', long, default_value = "data/distgit")]
-        dest: PathBuf,
+        /// Destination directory for cloned repositories (defaults to [distgit].dest in dbs.toml).
+        #[arg(short = 'o', long)]
+        dest: Option<PathBuf>,
 
         /// Custom target name for cloned repository (e.g. --as tacos-zstd).
         #[arg(name = "as", long = "as", visible_alias = "rename")]
@@ -115,9 +122,9 @@ pub enum DistgitCommands {
 
     /// Pull / sync updates for existing cloned dist-git repositories.
     Pull {
-        /// Destination directory containing cloned repositories.
-        #[arg(short = 'o', long, default_value = "data/distgit")]
-        dest: PathBuf,
+        /// Destination directory containing cloned repositories (defaults to [distgit].dest in dbs.toml).
+        #[arg(short = 'o', long)]
+        dest: Option<PathBuf>,
 
         /// Specific package names to pull (or all if omitted).
         packages: Vec<String>,
@@ -125,17 +132,17 @@ pub enum DistgitCommands {
 
     /// Synchronize a batch of dist-git repositories concurrently with worker pool.
     Sync {
-        /// Distribution preset to sync.
-        #[arg(short, long, default_value = "fedora-rawhide")]
-        distro: String,
+        /// Distribution preset to sync (defaults to [distgit].distro in dbs.toml).
+        #[arg(short, long)]
+        distro: Option<String>,
 
-        /// Destination directory for repositories.
-        #[arg(short = 'o', long, default_value = "data/distgit")]
-        dest: PathBuf,
+        /// Destination directory for repositories (defaults to [distgit].dest in dbs.toml).
+        #[arg(short = 'o', long)]
+        dest: Option<PathBuf>,
 
-        /// Number of parallel worker tasks.
-        #[arg(short = 'j', long, default_value = "4")]
-        concurrency: usize,
+        /// Number of parallel worker tasks (defaults to [distgit].concurrency in dbs.toml).
+        #[arg(short = 'j', long)]
+        concurrency: Option<usize>,
 
         /// Also download referenced upstream source archives from lookaside cache.
         #[arg(long)]
@@ -180,13 +187,13 @@ pub struct BuildArgs {
     #[arg(long)]
     pub mock_config_dir: Option<PathBuf>,
 
-    /// Directory for build logs and staged RPM artifacts.
-    #[arg(short = 'o', long, default_value = "staging")]
-    pub output_dir: PathBuf,
+    /// Directory for build logs and staged RPM artifacts (defaults to [distro].staging_dir in dbs.toml).
+    #[arg(short = 'o', long)]
+    pub output_dir: Option<PathBuf>,
 
-    /// Number of concurrent Mock worker processes.
-    #[arg(short = 'j', long, default_value = "4")]
-    pub concurrency: usize,
+    /// Number of concurrent Mock worker processes (defaults to [distgit].concurrency in dbs.toml).
+    #[arg(short = 'j', long)]
+    pub concurrency: Option<usize>,
 
     /// Dynamically feed staged RPMs back to Mock workers via a local repository.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
@@ -208,7 +215,7 @@ pub struct BuildArgs {
     #[arg(long)]
     pub record_db: bool,
 
-    /// Path to local lookaside cache for instant BTRFS CoW staging of source tarballs.
+    /// Path to local lookaside cache for instant BTRFS CoW staging of source tarballs (defaults to [distgit].lookaside_dir).
     #[arg(long, env = "DBS_LOOKASIDE_DIR")]
     pub lookaside_dir: Option<PathBuf>,
 
@@ -232,9 +239,9 @@ pub struct PkgArgs {
 /// Arguments for the `dag` subcommand.
 #[derive(Args, Debug)]
 pub struct DagArgs {
-    /// Directory containing .spec files or cloned dist-git repositories.
-    #[arg(short = 'i', long, default_value = "data/distgit")]
-    pub path: PathBuf,
+    /// Directory containing .spec files or cloned dist-git repositories (defaults to [distgit].dest in dbs.toml).
+    #[arg(short = 'i', long)]
+    pub path: Option<PathBuf>,
 
     /// Output path to save the generated dependency graph report in markdown.
     #[arg(long)]
@@ -248,7 +255,7 @@ pub struct DagArgs {
     #[arg(long, default_value = "mock")]
     pub runner: String,
 
-    /// Mock chroot configuration profile name or direct path to a .cfg file (e.g. tacos-rolling-x86_64, /path/to/profile.cfg).
+    /// Mock chroot configuration profile name or direct path to a .cfg file (defaults to [chroot].profile in dbs.toml).
     #[arg(short = 'r', long)]
     pub mock_root: Option<String>,
 
@@ -256,13 +263,13 @@ pub struct DagArgs {
     #[arg(long)]
     pub mock_config_dir: Option<PathBuf>,
 
-    /// Directory for build logs and staged RPM artifacts.
-    #[arg(short = 'o', long, default_value = "staging")]
-    pub output_dir: PathBuf,
+    /// Directory for build logs and staged RPM artifacts (defaults to [distro].staging_dir in dbs.toml).
+    #[arg(short = 'o', long)]
+    pub output_dir: Option<PathBuf>,
 
-    /// Number of concurrent workers per layer.
-    #[arg(short = 'j', long, default_value = "4")]
-    pub concurrency: usize,
+    /// Number of concurrent workers per layer (defaults to [distgit].concurrency in dbs.toml).
+    #[arg(short = 'j', long)]
+    pub concurrency: Option<usize>,
 
     /// Dynamically feed staged RPMs back to Mock workers via local repository.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
@@ -303,8 +310,8 @@ pub enum ChrootCommands {
 
     /// Inspect a Mock chroot profile or .cfg file and display configuration parameters.
     Inspect {
-        /// Profile name or path to .cfg file (e.g. tacos-rolling-x86_64, ./mock/custom.cfg).
-        target: String,
+        /// Profile name or path to .cfg file (defaults to [chroot].profile in dbs.toml).
+        target: Option<String>,
 
         /// Optional custom directory containing mock configs.
         #[arg(short = 'd', long)]
@@ -313,8 +320,8 @@ pub enum ChrootCommands {
 
     /// Check and validate a chroot configuration and test root creation with Mock.
     Check {
-        /// Profile name or path to .cfg file (e.g. tacos-rolling-x86_64, ./mock/custom.cfg).
-        target: String,
+        /// Profile name or path to .cfg file (defaults to [chroot].profile in dbs.toml).
+        target: Option<String>,
 
         /// Optional custom directory containing mock configs.
         #[arg(short = 'd', long)]
@@ -454,122 +461,122 @@ pub enum DistroCommands {
         #[arg(short, long, default_value = "tcst")]
         dist: String,
 
-        /// Base directory for distribution repositories.
-        #[arg(short, long, default_value = "/srv/dbs/tacos/distro")]
-        dest: PathBuf,
+        /// Base directory for distribution repositories (defaults to [distro].dest in dbs.toml).
+        #[arg(short, long)]
+        dest: Option<PathBuf>,
 
         /// Directory to store Mock chroot configuration files.
-        #[arg(short, long, default_value = "mock")]
-        mock_dir: PathBuf,
+        #[arg(short, long)]
+        mock_dir: Option<PathBuf>,
     },
 
     /// Build a complete distribution: DAG resolution, lookaside source staging, and layered builds.
     Build {
-        /// Distribution identifier (e.g. tacos-stable-x86_64).
-        name: String,
+        /// Distribution identifier (defaults to [distro].name in dbs.toml).
+        name: Option<String>,
 
-        /// Directory containing dist-git package specifications.
-        #[arg(short = 'i', long, default_value = "/srv/dbs/tacos/rpm")]
-        path: PathBuf,
+        /// Directory containing dist-git package specifications (defaults to [distgit].dest in dbs.toml).
+        #[arg(short = 'i', long)]
+        path: Option<PathBuf>,
 
-        /// Mock chroot profile name to use (defaults to distribution name).
+        /// Mock chroot profile name to use (defaults to [distro].chroot or [chroot].profile in dbs.toml).
         #[arg(short = 'r', long)]
         mock_root: Option<String>,
 
         /// Directory containing Mock .cfg profile files.
-        #[arg(long, default_value = "mock")]
+        #[arg(long)]
         mock_config_dir: Option<PathBuf>,
 
-        /// Destination directory for distribution repository output.
-        #[arg(short = 'o', long, default_value = "/srv/dbs/tacos/distro")]
-        dest: PathBuf,
+        /// Destination directory for distribution repository output (defaults to [distro].dest in dbs.toml).
+        #[arg(short = 'o', long)]
+        dest: Option<PathBuf>,
 
-        /// Lookaside cache directory for instant BTRFS CoW source staging.
-        #[arg(short = 'l', long, default_value = "/srv/dbs/lookaside")]
+        /// Lookaside cache directory for instant BTRFS CoW source staging (defaults to [distgit].lookaside_dir).
+        #[arg(short = 'l', long)]
         lookaside_dir: Option<PathBuf>,
 
-        /// Build worker concurrency.
-        #[arg(short = 'j', long, default_value = "4")]
-        concurrency: usize,
+        /// Build worker concurrency (defaults to [distro].workers in dbs.toml).
+        #[arg(short = 'j', long)]
+        concurrency: Option<usize>,
 
-        /// Staging directory for temporary worker builds.
-        #[arg(long, default_value = "/srv/dbs/tacos/staging")]
-        staging_dir: PathBuf,
+        /// Staging directory for temporary worker builds (defaults to [distro].staging_dir in dbs.toml).
+        #[arg(long)]
+        staging_dir: Option<PathBuf>,
 
-        /// Optional GPG key ID to sign RPMs and repomd metadata.
+        /// Optional GPG key ID to sign RPMs and repomd metadata (defaults to [distro].sign_key).
         #[arg(long)]
         sign_key: Option<String>,
 
-        /// Record builds and capabilities in the database.
+        /// Record builds and capabilities in the database (defaults to [database].record_db in dbs.toml).
         #[arg(long)]
         record_db: bool,
     },
 
     /// Organize RPMs into standard layout, run createrepo_c, optionally GPG sign, and generate client .repo.
     Publish {
-        /// Distribution identifier (e.g. tacos-stable-x86_64).
-        name: String,
+        /// Distribution identifier (defaults to [distro].name in dbs.toml).
+        name: Option<String>,
 
-        /// Source staging directory where built RPMs are located.
-        #[arg(short = 's', long, default_value = "/srv/dbs/tacos/staging")]
-        staging_dir: PathBuf,
+        /// Source staging directory where built RPMs are located (defaults to [distro].staging_dir in dbs.toml).
+        #[arg(short = 's', long)]
+        staging_dir: Option<PathBuf>,
 
-        /// Destination directory for distribution repository.
-        #[arg(short = 'd', long, default_value = "/srv/dbs/tacos/distro")]
-        dest: PathBuf,
+        /// Destination directory for distribution repository (defaults to [distro].dest in dbs.toml).
+        #[arg(short = 'd', long)]
+        dest: Option<PathBuf>,
 
-        /// Target architecture.
-        #[arg(short, long, default_value = "x86_64")]
-        arch: String,
+        /// Target architecture (defaults to [distro].arch in dbs.toml).
+        #[arg(short, long)]
+        arch: Option<String>,
 
-        /// Base URL for client .repo file (e.g. http://repos.tacos.org.mx).
-        #[arg(short, long, default_value = "http://repos.tacos.org.mx")]
-        base_url: String,
+        /// Base URL for client .repo file (defaults to [distro].base_url in dbs.toml).
+        #[arg(short, long)]
+        base_url: Option<String>,
 
-        /// Optional GPG Key ID to sign packages and repomd.xml with.
+        /// Optional GPG Key ID to sign packages and repomd.xml with (defaults to [distro].sign_key in dbs.toml).
         #[arg(long)]
         sign_key: Option<String>,
 
-        /// Number of parallel workers for createrepo_c.
-        #[arg(short = 'j', long, default_value = "4")]
-        workers: usize,
+        /// Number of parallel workers for createrepo_c (defaults to [distro].workers in dbs.toml).
+        #[arg(short = 'j', long)]
+        workers: Option<usize>,
     },
 
     /// Generate an Nginx virtual host configuration or launch a lightweight built-in HTTP repository server.
     Serve {
-        /// Distribution root directory.
-        #[arg(short, long, default_value = "/srv/dbs/tacos/distro")]
-        path: PathBuf,
+        /// Distribution root directory (defaults to [distro].dest in dbs.toml).
+        #[arg(short, long)]
+        path: Option<PathBuf>,
 
         /// Generate Nginx configuration and write to file instead of running built-in server.
         #[arg(long)]
         nginx_conf: Option<PathBuf>,
 
-        /// Server name domain for Nginx config.
-        #[arg(long, default_value = "repos.tacos.org.mx")]
-        server_name: String,
+        /// Server name domain for Nginx config (defaults to [distro].server_name in dbs.toml).
+        #[arg(long)]
+        server_name: Option<String>,
 
-        /// HTTP port for built-in repository server or Nginx listen port.
-        #[arg(short, long, default_value = "8080")]
-        port: u16,
+        /// HTTP port for built-in repository server or Nginx listen port (defaults to [distro].server_port).
+        #[arg(short, long)]
+        port: Option<u16>,
 
-        /// Bind host for built-in server.
-        #[arg(long, default_value = "0.0.0.0")]
-        host: String,
+        /// Bind host for built-in server (defaults to [distro].server_host in dbs.toml).
+        #[arg(long)]
+        host: Option<String>,
     },
 
     /// Display the status and package inventory of a distribution repository.
     Status {
-        /// Distribution identifier.
-        name: String,
+        /// Distribution identifier (defaults to [distro].name in dbs.toml).
+        name: Option<String>,
 
-        /// Distribution root directory.
-        #[arg(short, long, default_value = "/srv/dbs/tacos/distro")]
-        dest: PathBuf,
+        /// Distribution root directory (defaults to [distro].dest in dbs.toml).
+        #[arg(short, long)]
+        dest: Option<PathBuf>,
 
-        /// Target architecture.
-        #[arg(short, long, default_value = "x86_64")]
-        arch: String,
+        /// Target architecture (defaults to [distro].arch in dbs.toml).
+        #[arg(short, long)]
+        arch: Option<String>,
     },
 }
 
@@ -612,3 +619,28 @@ pub enum DbCommands {
         down: bool,
     },
 }
+
+/// Arguments for the `config` subcommand.
+#[derive(Args, Debug)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommands {
+    /// Display the resolved DBS configuration and loaded configuration file path.
+    Show,
+
+    /// Generate a starter dbs.toml configuration file.
+    Init {
+        /// Destination path for generated configuration file.
+        #[arg(short = 'o', long = "output", default_value = "dbs.toml")]
+        output: PathBuf,
+
+        /// Overwrite destination file if it already exists.
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
