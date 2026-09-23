@@ -150,12 +150,31 @@ Store, verify, and maintain source tarballs with zero-disk BTRFS reflinks:
 ./bin/dbs lookaside gc --dry-run
 ```
 
+### 8. Build & Publish Complete Distribution Repositories
+
+Automate end-to-end repository initialization, DAG compilation, repodata indexing, GPG signing, and web serving:
+
+```bash
+# Initialize a new distribution repository and Mock chroot profile
+./bin/dbs distro init tacos-stable-x86_64 --arch x86_64 --channel stable
+
+# Compile packages in topological DAG order and publish to the repository
+./bin/dbs distro build tacos-stable-x86_64 --path /srv/dbs/tacos/rpm -j 4
+
+# Check repository inventory, package counts, and repodata health
+./bin/dbs distro status tacos-stable-x86_64
+
+# Expose repository via embedded HTTP server or export Nginx config
+./bin/dbs distro serve --path /srv/dbs/tacos/distro --port 8080
+```
+
 ---
 
 ## Command Reference
 
 | Command | Subcommand / Options | Description |
 | :--- | :--- | :--- |
+| `dbs distro` | `init`, `build`, `publish`, `serve`, `status` | End-to-end distribution repository lifecycle: initialization, DAG build, publication, GPG signing, and HTTP/Nginx serving. |
 | `dbs explore` | `--distro`, `--search`, `--limit` | Search remote packages across Pagure, GitLab, or Forgejo APIs. |
 | `dbs distgit clone` | `--distro`, `--as`, `--rename-spec`, `--new-origin` | Clone dist-git repositories with optional renaming and remote setup. |
 | `dbs distgit sync` | `-j`, `--sources`, `--search`, `--record-db` | Batch synchronize multiple repositories and lookaside sources concurrently. |

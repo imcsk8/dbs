@@ -53,6 +53,9 @@ pub enum Commands {
 
     /// Manage, maintain, synchronize, and upload source archives into the dist-git lookaside cache.
     Lookaside(LookasideArgs),
+
+    /// Initialize, build, publish, sign, and serve complete distribution repositories.
+    Distro(DistroArgs),
 }
 
 /// Arguments for the `explore` subcommand.
@@ -414,5 +417,155 @@ pub enum LookasideCommands {
         /// Optional path to dist-git workspace to check for active hash references.
         #[arg(long)]
         distgit: Option<PathBuf>,
+    },
+}
+
+/// Arguments for the `distro` subcommand suite.
+#[derive(Args, Debug)]
+pub struct DistroArgs {
+    #[command(subcommand)]
+    pub action: DistroCommands,
+}
+
+/// Actions supported by the `distro` subcommand.
+#[derive(Subcommand, Debug)]
+pub enum DistroCommands {
+    /// Initialize a new distribution repository structure and Mock chroot profile.
+    Init {
+        /// Distribution identifier (e.g. tacos-stable-x86_64).
+        name: String,
+
+        /// Target CPU architecture (e.g. x86_64, aarch64).
+        #[arg(short, long, default_value = "x86_64")]
+        arch: String,
+
+        /// Distribution release channel (e.g. stable, rolling, testing).
+        #[arg(short, long, default_value = "stable")]
+        channel: String,
+
+        /// Upstream release version base (e.g. 46, 10).
+        #[arg(short, long, default_value = "46")]
+        releasever: String,
+
+        /// RPM distribution macro tag (e.g. tcst, tcrs).
+        #[arg(short, long, default_value = "tcst")]
+        dist: String,
+
+        /// Base directory for distribution repositories.
+        #[arg(short, long, default_value = "/srv/dbs/tacos/distro")]
+        dest: PathBuf,
+
+        /// Directory to store Mock chroot configuration files.
+        #[arg(short, long, default_value = "mock")]
+        mock_dir: PathBuf,
+    },
+
+    /// Build a complete distribution: DAG resolution, lookaside source staging, and layered builds.
+    Build {
+        /// Distribution identifier (e.g. tacos-stable-x86_64).
+        name: String,
+
+        /// Directory containing dist-git package specifications.
+        #[arg(short = 'i', long, default_value = "/srv/dbs/tacos/rpm")]
+        path: PathBuf,
+
+        /// Mock chroot profile name to use (defaults to distribution name).
+        #[arg(short = 'r', long)]
+        mock_root: Option<String>,
+
+        /// Directory containing Mock .cfg profile files.
+        #[arg(long, default_value = "mock")]
+        mock_config_dir: Option<PathBuf>,
+
+        /// Destination directory for distribution repository output.
+        #[arg(short = 'o', long, default_value = "/srv/dbs/tacos/distro")]
+        dest: PathBuf,
+
+        /// Lookaside cache directory for instant BTRFS CoW source staging.
+        #[arg(short = 'l', long, default_value = "/srv/dbs/lookaside")]
+        lookaside_dir: Option<PathBuf>,
+
+        /// Build worker concurrency.
+        #[arg(short = 'j', long, default_value = "4")]
+        concurrency: usize,
+
+        /// Staging directory for temporary worker builds.
+        #[arg(long, default_value = "/srv/dbs/tacos/staging")]
+        staging_dir: PathBuf,
+
+        /// Optional GPG key ID to sign RPMs and repomd metadata.
+        #[arg(long)]
+        sign_key: Option<String>,
+
+        /// Record builds and capabilities in the database.
+        #[arg(long)]
+        record_db: bool,
+    },
+
+    /// Organize RPMs into standard layout, run createrepo_c, optionally GPG sign, and generate client .repo.
+    Publish {
+        /// Distribution identifier (e.g. tacos-stable-x86_64).
+        name: String,
+
+        /// Source staging directory where built RPMs are located.
+        #[arg(short = 's', long, default_value = "/srv/dbs/tacos/staging")]
+        staging_dir: PathBuf,
+
+        /// Destination directory for distribution repository.
+        #[arg(short = 'd', long, default_value = "/srv/dbs/tacos/distro")]
+        dest: PathBuf,
+
+        /// Target architecture.
+        #[arg(short, long, default_value = "x86_64")]
+        arch: String,
+
+        /// Base URL for client .repo file (e.g. http://repos.tacos.org.mx).
+        #[arg(short, long, default_value = "http://repos.tacos.org.mx")]
+        base_url: String,
+
+        /// Optional GPG Key ID to sign packages and repomd.xml with.
+        #[arg(long)]
+        sign_key: Option<String>,
+
+        /// Number of parallel workers for createrepo_c.
+        #[arg(short = 'j', long, default_value = "4")]
+        workers: usize,
+    },
+
+    /// Generate an Nginx virtual host configuration or launch a lightweight built-in HTTP repository server.
+    Serve {
+        /// Distribution root directory.
+        #[arg(short, long, default_value = "/srv/dbs/tacos/distro")]
+        path: PathBuf,
+
+        /// Generate Nginx configuration and write to file instead of running built-in server.
+        #[arg(long)]
+        nginx_conf: Option<PathBuf>,
+
+        /// Server name domain for Nginx config.
+        #[arg(long, default_value = "repos.tacos.org.mx")]
+        server_name: String,
+
+        /// HTTP port for built-in repository server or Nginx listen port.
+        #[arg(short, long, default_value = "8080")]
+        port: u16,
+
+        /// Bind host for built-in server.
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+    },
+
+    /// Display the status and package inventory of a distribution repository.
+    Status {
+        /// Distribution identifier.
+        name: String,
+
+        /// Distribution root directory.
+        #[arg(short, long, default_value = "/srv/dbs/tacos/distro")]
+        dest: PathBuf,
+
+        /// Target architecture.
+        #[arg(short, long, default_value = "x86_64")]
+        arch: String,
     },
 }

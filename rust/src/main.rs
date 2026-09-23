@@ -14,17 +14,19 @@ pub mod cli;
 pub mod dag;
 pub mod db;
 pub mod distgit;
+pub mod distro;
 pub mod lookaside;
 pub mod models;
 pub mod runner;
 pub mod schema;
 pub mod types;
 
-use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, DagArgs, DistgitArgs, DistgitCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
+use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, DagArgs, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
 use dag::DependencyGraph;
 use distgit::provider::DistroConfig;
 use distgit::spec::{parse_spec_file, SpecMetadata};
 use distgit::DistGitClient;
+use distro::{generate_nginx_config, get_distro_status, init_distro, publish_distro, run_http_server, DistroInitOptions, DistroPublishOptions};
 use lookaside::LookasideManager;
 use runner::{BuildOutput, BuildRunner, MockRunner, RpmbuildRunner};
 
@@ -41,6 +43,7 @@ async fn main() -> Result<()> {
         Commands::Dag(args) => handle_dag(args).await?,
         Commands::Chroot(args) => handle_chroot(args).await?,
         Commands::Lookaside(args) => handle_lookaside(args).await?,
+        Commands::Distro(args) => handle_distro(args).await?,
     }
 
     Ok(())
@@ -897,6 +900,251 @@ async fn handle_lookaside(args: LookasideArgs) -> Result<()> {
             for orphan in &report.orphaned_objects {
                 println!("    {} {}", if dry_run { "[DRY RUN] Would delete:" } else { "Pruned:" }, orphan.display());
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// Dispatches the `distro` subcommand to manage, build, publish, and serve distribution repositories.
+async fn handle_distro(args: DistroArgs) -> Result<()> {
+    match args.action {
+        DistroCommands::Init {
+            name,
+            arch,
+            channel,
+            releasever,
+            dist,
+            dest,
+            mock_dir,
+        } => {
+            println!("===========================================================");
+            println!(" DBS Distribution Repository Initialization");
+            println!(" Target Distribution: {}", name);
+            println!(" Architecture:        {}", arch);
+            println!(" Channel:             {}", channel);
+            println!(" Base Directory:      {}", dest.display());
+            println!("===========================================================");
+
+            let opts = DistroInitOptions {
+                name: name.clone(),
+                arch,
+                channel,
+                releasever,
+                dist_tag: dist,
+                dest_root: dest,
+                mock_dir: mock_dir.clone(),
+            };
+
+            let path = match init_distro(&opts) {
+                Ok(p) => p,
+                Err(e) => return Err(eyre!("Failed to initialize distribution: {}", e)),
+            };
+
+            println!("✓ Distribution repository structure created at {}", path.display());
+            println!("✓ Mock configuration initialized at {}/{}.cfg", mock_dir.display(), name);
+            println!("===========================================================");
+            println!("Next step: Place .spec files in your dist-git directory and run:");
+            println!("  dbs distro build {}", name);
+        }
+
+        DistroCommands::Build {
+            name,
+            path,
+            mock_root,
+            mock_config_dir,
+            dest,
+            lookaside_dir,
+            concurrency,
+            staging_dir,
+            sign_key,
+            record_db,
+        } => {
+            println!("===========================================================");
+            println!(" DBS Distribution Build Orchestration");
+            println!(" Target Distribution: {}", name);
+            println!(" Spec/Dist-Git Root:  {}", path.display());
+            println!(" Staging Directory:   {}", staging_dir.display());
+            println!(" Concurrency:         {}", concurrency);
+            println!("===========================================================");
+
+            // 1. Ensure lookaside sources are synchronized
+            let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
+            println!("\n▶ Synchronizing source archives into lookaside cache ({})...", lookaside_mgr.root.display());
+            match lookaside_mgr.sync_dir(&path, concurrency).await {
+                Ok(rep) => {
+                    println!("✓ Lookaside sources: {} cached, {} downloaded, {} failed (total: {})",
+                        rep.already_cached, rep.downloaded, rep.failed, rep.total_sources_found);
+                }
+                Err(e) => eprintln!("Warning: Lookaside sync issue: {}", e),
+            }
+
+            // 2. Resolve dependency graph and compute layers
+            println!("\n▶ Resolving package dependency graph (DAG)...");
+            let mut graph = DependencyGraph::new();
+            let loaded = graph.load_from_dir(&path)?;
+            if loaded == 0 {
+                return Err(eyre!("No package .spec files found in {}", path.display()));
+            }
+
+            let layers = graph.compute_layers()?;
+            println!("✓ Loaded {} packages across {} compilation layers.", graph.packages.len(), layers.len());
+
+            // 3. Setup runner
+            let chroot_name = mock_root.unwrap_or_else(|| name.clone());
+            let mut mock_runner = MockRunner::resolve(&chroot_name, mock_config_dir)?;
+            if let Some(ld) = lookaside_dir.clone() {
+                mock_runner = mock_runner.with_lookaside_dir(ld);
+            }
+            let runner_arc = Arc::new(mock_runner);
+
+            let mut db_conn = if record_db {
+                db::establish_connection().ok()
+            } else {
+                None
+            };
+
+            // 4. Execute layered builds with dynamic repo
+            for layer in &layers {
+                println!("\n===========================================================");
+                println!(" Starting Layer {} ({} package(s))", layer.layer_index, layer.packages.len());
+                println!("===========================================================");
+
+                let mut targets = Vec::new();
+                for pkg in &layer.packages {
+                    if let Some(meta) = graph.packages.get(pkg) {
+                        if let Some(spec) = &meta.spec_path {
+                            targets.push(spec.clone());
+                        }
+                    }
+                }
+
+                if !targets.is_empty() {
+                    let results = runner_arc
+                        .clone()
+                        .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
+                        .await;
+
+                    for (idx, res) in results.into_iter().enumerate() {
+                        match res {
+                            Ok(out) => {
+                                print_build_output(&out);
+                                if let Some(conn) = &mut db_conn {
+                                    if let Some(target) = targets.get(idx) {
+                                        let pkg_name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
+                                        let _ = db::record_build_result(conn, pkg_name, &out);
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("✗ Worker build error: {}", e),
+                        }
+                    }
+                }
+            }
+
+            // 5. Automatically publish build artifacts to distribution repo
+            println!("\n▶ Publishing build artifacts into distribution repository...");
+            let pub_opts = DistroPublishOptions {
+                name: name.clone(),
+                staging_dir,
+                dest_root: dest.clone(),
+                arch: "x86_64".to_string(),
+                base_url: "http://repos.tacos.org.mx".to_string(),
+                sign_key,
+                workers: concurrency,
+            };
+
+            let report = publish_distro(&pub_opts)?;
+            println!("\n===========================================================");
+            println!(" Distribution Build & Publication Complete!");
+            println!(" Binary Repository:   {}", report.binary_repo.display());
+            println!(" Total Binary RPMs:   {}", report.binary_count);
+            println!(" Total Source RPMs:   {}", report.source_count);
+            println!(" Client Repo File:    {}", report.client_repo_file.display());
+            println!(" GPG Signed:          {}", if report.gpg_signed { "Yes" } else { "No" });
+            println!("===========================================================");
+        }
+
+        DistroCommands::Publish {
+            name,
+            staging_dir,
+            dest,
+            arch,
+            base_url,
+            sign_key,
+            workers,
+        } => {
+            println!("===========================================================");
+            println!(" DBS Distribution Repository Publishing");
+            println!(" Distribution:        {}", name);
+            println!(" Staging Directory:   {}", staging_dir.display());
+            println!(" Output Directory:    {}/{}", dest.display(), name);
+            println!(" Base URL:            {}", base_url);
+            println!(" Architecture:        {}", arch);
+            println!("===========================================================");
+
+            let opts = DistroPublishOptions {
+                name: name.clone(),
+                staging_dir,
+                dest_root: dest,
+                arch,
+                base_url,
+                sign_key,
+                workers,
+            };
+
+            let report = publish_distro(&opts)?;
+            println!("\n===========================================================");
+            println!(" Repository Publication Successful");
+            println!(" * Published Binaries:  {}", report.binary_count);
+            println!(" * Published Sources:   {}", report.source_count);
+            println!(" * Repodata Location:   {}/repodata/", report.binary_repo.display());
+            println!(" * Client Config File:  {}", report.client_repo_file.display());
+            println!(" * GPG Signed:          {}", if report.gpg_signed { "Yes" } else { "No" });
+            println!("===========================================================");
+        }
+
+        DistroCommands::Serve {
+            path,
+            nginx_conf,
+            server_name,
+            port,
+            host,
+        } => {
+            if let Some(out_conf) = nginx_conf {
+                println!("Generating Nginx virtual host configuration...");
+                let content = generate_nginx_config(&path, &server_name, port);
+                if let Some(parent) = out_conf.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                match fs::write(&out_conf, content) {
+                    Ok(_) => {
+                        println!("✓ Nginx configuration written to {}", out_conf.display());
+                        println!("  Apply with: sudo cp {} /etc/nginx/conf.d/ && sudo nginx -t && sudo systemctl reload nginx", out_conf.display());
+                    }
+                    Err(e) => return Err(eyre!("Failed to write Nginx config: {}", e)),
+                }
+            } else {
+                run_http_server(path, &host, port).await?;
+            }
+        }
+
+        DistroCommands::Status { name, dest, arch } => {
+            println!("===========================================================");
+            println!(" DBS Distribution Repository Status: {}", name);
+            println!("===========================================================");
+
+            let st = get_distro_status(&name, &dest, &arch)?;
+            println!(" Repository Directory: {}", st.root_dir.display());
+            println!(" Target Architecture:  {}", st.arch);
+            println!(" Binary Packages:      {}", st.binary_count);
+            println!(" Source Packages:      {}", st.source_count);
+            println!(" Repodata Generated:   {}", if st.repodata_present { "Yes" } else { "No (Run 'dbs distro publish')" });
+            println!(" GPG Signed:           {}", if st.gpg_signed { "Yes (repomd.xml.asc verified)" } else { "No" });
+            if let Some(cf) = st.client_repo_file {
+                println!(" Client Configuration: {}", cf.display());
+            }
+            println!("===========================================================");
         }
     }
 

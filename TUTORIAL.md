@@ -574,7 +574,132 @@ cat /proc/sys/fs/pipe-user-pages-hard
 
 ---
 
-## 13. Troubleshooting & Best Practices
+## 13. GPG Key Generation & Package Signing
+
+Enterprise RPM distributions sign both binary RPM packages and repository metadata (`repomd.xml`) to guarantee origin authenticity and prevent tampering.
+
+### Step 1: Generate an RSA 4096-bit Release Signing Key
+
+Create a GPG batch configuration file `rpm-key.batch`:
+
+```ini
+%echo Generating TacOS Distribution Signing Key
+Key-Type: RSA
+Key-Length: 4096
+Key-Usage: sign
+Subkey-Type: RSA
+Subkey-Length: 4096
+Subkey-Usage: sign
+Name-Real: TacOS Release Engineering
+Name-Email: release@tacos.org.mx
+Expire-Date: 2y
+%no-protection
+%commit
+%echo Done
+```
+
+Generate the key without interactive prompts:
+```bash
+gpg --batch --generate-key rpm-key.batch
+```
+
+Verify the key ID and fingerprint:
+```bash
+gpg --list-secret-keys --keyid-format LONG release@tacos.org.mx
+```
+
+### Step 2: Configure `~/.rpmmacros` for Signing
+
+Ensure `rpm-sign` is installed (`sudo dnf install -y rpm-sign`). Configure your `~/.rpmmacros` file:
+
+```ini
+%_signature gpg
+%_gpg_name release@tacos.org.mx
+%_gpg_path ~/.gnupg
+%_gpg_sign_cmd %{__gpg} gpg \
+  --batch --no-verbose --no-armor \
+  --pinentry-mode loopback \
+  --no-secmem-warning \
+  -u "%{_gpg_name}" -sbo %{__signature_filename} %{__plaintext_filename}
+```
+
+### Step 3: Export the Public Key for Clients
+
+Export the ASCII-armored public key to your distribution root directory:
+```bash
+gpg --armor --export release@tacos.org.mx > /srv/dbs/tacos/distro/tacos-stable-x86_64/RPM-GPG-KEY-tacos-stable-x86_64
+```
+
+### Step 4: Sign Packages and Repository Metadata
+
+* **Sign binary RPMs:**
+  ```bash
+  rpmsign --addsign /srv/dbs/tacos/distro/tacos-stable-x86_64/x86_64/*.rpm
+  ```
+  Verify signatures with `rpm -Kv <package.rpm>`.
+
+* **Sign repository metadata:**
+  After running `createrepo_c`, sign `repomd.xml`:
+  ```bash
+  gpg --detach-sign --armor --batch --yes -u release@tacos.org.mx \
+    /srv/dbs/tacos/distro/tacos-stable-x86_64/x86_64/repodata/repomd.xml
+  ```
+  This creates `repomd.xml.asc`.
+
+---
+
+## 14. Distribution Repository Lifecycle with `dbs distro`
+
+DBS provides a unified `dbs distro` command suite to automate initialization, building, indexing, signing, and serving.
+
+### 1. Initialize Distribution Layout & Mock Profile
+```bash
+./bin/dbs distro init tacos-stable-x86_64 \
+  --arch x86_64 \
+  --channel stable \
+  --dist tcst \
+  --dest /srv/dbs/tacos/distro
+```
+
+### 2. End-to-End Build & Publish
+Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW reflinks, compiles in Mock with dynamic repository feedback, and publishes the finished RPMs:
+```bash
+./bin/dbs distro build tacos-stable-x86_64 \
+  --path /srv/dbs/tacos/rpm \
+  --lookaside-dir /srv/dbs/lookaside \
+  --concurrency 4 \
+  --dest /srv/dbs/tacos/distro \
+  --sign-key release@tacos.org.mx
+```
+
+### 3. Publish & Index Existing Staging Artifacts
+```bash
+./bin/dbs distro publish tacos-stable-x86_64 \
+  --staging-dir /srv/dbs/tacos/staging \
+  --dest /srv/dbs/tacos/distro \
+  --base-url http://repos.tacos.org.mx \
+  --sign-key release@tacos.org.mx
+```
+
+### 4. Check Repository Health & Metrics
+```bash
+./bin/dbs distro status tacos-stable-x86_64 --dest /srv/dbs/tacos/distro
+```
+
+### 5. Expose via Web Server
+* **Generate Nginx configuration file:**
+  ```bash
+  ./bin/dbs distro serve --path /srv/dbs/tacos/distro --nginx-conf /etc/nginx/conf.d/tacos.conf
+  sudo nginx -t && sudo systemctl reload nginx
+  ```
+* **Or launch the built-in async HTTP file server for instant testing:**
+  ```bash
+  ./bin/dbs distro serve --path /srv/dbs/tacos/distro --port 8080
+  ```
+
+---
+
+## 15. Troubleshooting & Best Practices
 
 ### Mock Permissions
 * **Issue:** `mock: error: Cannot find user in mock group`
