@@ -518,7 +518,63 @@ When building packages (`dbs build` or `dbs dag --build`), DBS checks the lookas
 
 ---
 
-## 12. Troubleshooting & Best Practices
+## 12. Host Kernel Tuning for High-Throughput Parallel Builds
+
+When running multi-worker parallel builds (`dbs dag -j4`, `dbs build`), multiple Mock / `systemd-nspawn` container workers run concurrently under the same host UID. Modern build tools (Cargo, make jobservers, Ninja) and comprehensive test suites (`strace`, `glibc`, network daemons) spawn thousands of IPC pipes simultaneously.
+
+### The Pipe Buffer Starvation Trap
+
+By default, Linux limits an unprivileged UID to 16,384 pipe pages across all processes via `/proc/sys/fs/pipe-user-pages-soft`.
+* **The Math:** Each standard Linux pipe allocates 16 pages ($16 \times 4\,\text{KB} = 64\,\text{KB}$).
+  $$\frac{16{,}384 \text{ pages}}{16 \text{ pages / pipe}} = 1{,}024 \text{ concurrent pipes per UID}$$
+* **The Silent Degradation:** When the soft limit is exceeded, Linux **does not fail** `pipe()` calls. Instead, it **silently downgrades all newly created pipes to 2 pages (8 KB)** and rejects `fcntl(F_SETPIPE_SZ)` buffer expansions with `EPERM`.
+* **The Consequences:**
+  * Build jobservers stall or deadlock waiting for pipe buffer space.
+  * System-level test suites (like `strace` tests for `vmsplice`, `splice`, `tee`, or socket IPC) fail with test timeouts or buffer errors.
+
+### Applying the Tuning Profile
+
+DBS ships with a dedicated host sysctl configuration profile at [`config/sysctl/99-dbs-build-host.conf`](file:///home/imcsk8/projects/gemini-workdir/dbs/config/sysctl/99-dbs-build-host.conf):
+
+```ini
+# /etc/sysctl.d/99-dbs-build-host.conf
+# DBS High-Throughput Build Host Kernel Tuning
+
+# Disable per-user pipe buffer limits to prevent jobserver deadlocks and test throttling
+fs.pipe-user-pages-soft = 0
+fs.pipe-user-pages-hard = 0
+
+# Increase max open file descriptors for high worker concurrency
+fs.file-max = 2097152
+
+# Increase inotify watches for test suites and dist-git monitors
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 8192
+```
+
+#### Step 1: Install the Profile on Your Build Host
+
+```bash
+sudo cp config/sysctl/99-dbs-build-host.conf /etc/sysctl.d/
+sudo sysctl --system
+```
+
+#### Step 2: Verify Active Kernel Values
+
+```bash
+cat /proc/sys/fs/pipe-user-pages-soft
+# Output: 0 (unlimited soft limit)
+
+cat /proc/sys/fs/pipe-user-pages-hard
+# Output: 0 (unlimited hard limit)
+```
+
+> [!TIP]
+> **Safety on Dedicated Build Hosts:** Setting `fs.pipe-user-pages-soft = 0` removes the artificial 1,024 pipe bottleneck. Uncontrolled memory usage is still prevented by `RLIMIT_NOFILE` (`ulimit -n`, which bounds file descriptors) and systemd cgroups v2 kernel memory accounting (`memory.max`).
+
+---
+
+## 13. Troubleshooting & Best Practices
 
 ### Mock Permissions
 * **Issue:** `mock: error: Cannot find user in mock group`

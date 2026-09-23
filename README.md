@@ -54,6 +54,18 @@ sudo btrfs subvolume create /srv/dbs/lookaside
 sudo chown -R $USER:mock /srv/dbs/lookaside
 ```
 
+#### Recommended Host Kernel Tuning (High-Throughput Parallel Builds)
+When running high-concurrency builds (`dbs dag -j4`, `dbs build`), multiple Mock / `systemd-nspawn` workers run simultaneously under the same host UID. Build tools (Cargo, make jobservers, Ninja) and comprehensive test suites (`strace`, `glibc`) create thousands of IPC pipes.
+
+By default, Linux limits an unprivileged UID to 16,384 pipe pages (only 1,024 pipes at 64 KB each) via `fs.pipe-user-pages-soft`. Exceeding this limit causes Linux to **silently demote newly created pipes to 2 pages (8 KB)** and reject `fcntl(F_SETPIPE_SZ)` expansions, triggering jobserver deadlocks, throughput collapse, or test failures.
+
+For dedicated build servers and CI nodes, install the provided host sysctl tuning profile:
+
+```bash
+sudo cp config/sysctl/99-dbs-build-host.conf /etc/sysctl.d/
+sudo sysctl --system
+```
+
 ### 2. Build DBS
 
 Compile the project and install the binary:
