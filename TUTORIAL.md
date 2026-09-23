@@ -347,33 +347,177 @@ Instead of manually building each package, DBS can orchestrate the entire topolo
 
 ---
 
-## 10. Supply Chain Database Tracking (Optional)
+## 10. Supply Chain Database Tracking & Database Provisioning
 
-DBS includes an optional relational database schema (backed by PostgreSQL and Diesel) for tracking operating systems, packages, source commits, capabilities, and build artifacts.
+DBS includes an integrated relational database schema (backed by PostgreSQL and Diesel) for tracking operating systems, packages, source commits, capabilities, build durations, logs, and compiled RPM artifacts.
 
-### Start the Database Container
+When distributing DBS, **no Makefile or loose SQL scripts are required**—the complete schema from `rust/migrations/2025-07-03-050157_supply_chain/` is compiled directly into the `dbs` binary and applied via the `dbs db` subcommand suite.
+
+---
+
+### Use Case A: PostgreSQL Installed Natively on the Host (Recommended for Dedicated Build Hosts)
+
+For high-throughput, enterprise build servers (such as Fedora ELN, RHEL, CentOS Stream, or TacOS), running PostgreSQL natively as a systemd service delivers maximum I/O performance and eliminates container runtime overhead.
+
+#### Step 1: Install PostgreSQL Packages
 
 ```bash
-# Start the local PostgreSQL container
-make db
-
-# Apply Diesel database migrations
-make bootstrap
+sudo dnf install -y postgresql-server postgresql-contrib
 ```
 
-### Synchronize Packages and Record to Database
+#### Step 2: Initialize the Database Cluster
 
 ```bash
+sudo postgresql-setup --initdb
+```
+
+#### Step 3: Configure High-Throughput Engine Tuning
+
+Edit `/var/lib/pgsql/data/postgresql.conf` to optimize PostgreSQL for concurrent package build recording:
+
+```ini
+# /var/lib/pgsql/data/postgresql.conf
+
+# Disable synchronous commit for 10x faster write throughput during build spikes
+synchronous_commit = off
+
+# Increase shared buffer cache and working memory
+shared_buffers = 512MB
+work_mem = 64MB
+temp_buffers = 32MB
+
+# Optimize checkpoint behavior
+checkpoint_completion_target = 0.9
+wal_buffers = 16MB
+```
+
+#### Step 4: Configure Authentication in `pg_hba.conf`
+
+Ensure local connections for the `dbs` user are authenticated via password (md5/scram-sha-256) by editing `/var/lib/pgsql/data/pg_hba.conf`:
+
+```text
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   dbs             dbs                                     md5
+host    dbs             dbs             127.0.0.1/32            md5
+host    dbs             dbs             ::1/128                 md5
+```
+
+#### Step 5: Start and Enable the PostgreSQL Service
+
+```bash
+sudo systemctl enable --now postgresql
+```
+
+#### Step 6: Create the `dbs` Role and Database
+
+As the `postgres` system user, create the database user and application database:
+
+```bash
+# Create user with password 'prueba123' (adjust password as needed for your environment)
+sudo -u postgres psql -c "CREATE USER dbs WITH PASSWORD 'prueba123';"
+
+# Create dedicated dbs database owned by dbs
+sudo -u postgres psql -c "CREATE DATABASE dbs OWNER dbs;"
+
+# Grant privileges
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE dbs TO dbs;"
+sudo -u postgres psql -d dbs -c "GRANT ALL ON SCHEMA public TO dbs;"
+```
+
+#### Step 7: Configure Connection Environment
+
+DBS automatically resolves database connection settings from:
+1. CLI option `--url <URL>`
+2. Environment variable `DATABASE_URL`
+3. System configuration `/etc/dbs/dbs.env`
+4. User configuration `~/.config/dbs/config.env`
+5. Local `.env`
+
+For system-wide service or CLI execution:
+
+```bash
+sudo mkdir -p /etc/dbs
+echo 'DATABASE_URL="postgres://dbs:prueba123@127.0.0.1:5432/dbs"' | sudo tee /etc/dbs/dbs.env
+sudo chmod 640 /etc/dbs/dbs.env
+```
+
+Or for current workspace development:
+
+```bash
+echo 'DATABASE_URL="postgres://dbs:prueba123@127.0.0.1:5432/dbs"' > .env
+```
+
+#### Step 8: Bootstrap Schema Using the `dbs` Binary
+
+Run `dbs db bootstrap` to apply the embedded schema and default seeds (architectures, package managers, TacOS presets) without needing `psql` or external files:
+
+```bash
+./bin/dbs db bootstrap
+```
+
+Output:
+```text
+===========================================================
+ DBS Database Bootstrap
+===========================================================
+Applying embedded DBS schema from rust/migrations/2025-07-03-050157_supply_chain/up.sql...
+✅ Database schema initialized and seeded successfully.
+-----------------------------------------------------------
+ Database:                dbs
+ PostgreSQL:              PostgreSQL 17.7 on x86_64-pc-linux-gnu ...
+ Registered OS presets:   4
+ Supported architectures: 5
+ Package managers:        7
+ Initial packages:        0
+===========================================================
+```
+
+---
+
+### Use Case B: Automated Provisioning via `setup_db.sh`
+
+For a fully automated setup that handles both package installation, cluster initialization, tuning, user creation, and binary bootstrap in a single command:
+
+```bash
+# For native host PostgreSQL:
+sudo ./scripts/setup_db.sh --mode host
+
+# For Podman containerized PostgreSQL (binds to 127.0.0.1:9436):
+./scripts/setup_db.sh --mode container
+```
+
+---
+
+### Use Case C: Inspecting, Resetting, and Exporting Schema
+
+DBS provides complete lifecycle management for the database:
+
+```bash
+# 1. Inspect database connectivity, PostgreSQL version, and table counts:
+./bin/dbs db status
+
+# 2. Reset database (drops all tables and re-applies clean schema):
+./bin/dbs db reset --force
+
+# 3. Export embedded schema to stdout (for DBAs, CI/CD, or manual execution):
+./bin/dbs db dump-schema          # Outputs up.sql
+./bin/dbs db dump-schema --down   # Outputs down.sql
+```
+
+---
+
+### Synchronizing Packages & Recording Builds
+
+Once the database is initialized, record dist-git synchronizations and build metrics into the supply chain catalog:
+
+```bash
+# Sync packages from dist-git and register metadata + dependencies in the database:
 ./bin/dbs distgit sync --distro fedora-rawhide --search zstd --limit 5 --record-db
-```
 
-### Query Database Records
-
-```bash
-# List tracked operating systems
+# List tracked operating systems:
 ./bin/dbs os list
 
-# List recorded packages
+# Query recorded packages:
 ./bin/dbs pkg list
 ```
 

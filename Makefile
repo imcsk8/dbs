@@ -37,14 +37,11 @@ bin:
 release_dirs: bin
 
 clean_db:
-	pushd sql
-	migrate.sh down
-	popd
+	@if [ -x ./bin/dbs ]; then ./bin/dbs db reset --force; else cd sql && ./migrate.sh down; fi
 
 bootstrap:
-	pushd sql
-	sql/migrate.sh up
-	popd
+	@if [ -x ./bin/dbs ]; then ./bin/dbs db bootstrap; else cd sql && ./migrate.sh up; fi
+
 
 build:
 	make -C rust build

@@ -56,6 +56,9 @@ pub enum Commands {
 
     /// Initialize, build, publish, sign, and serve complete distribution repositories.
     Distro(DistroArgs),
+
+    /// Manage database lifecycle, schema bootstrap, status, reset, and SQL schema dumps.
+    Db(DbArgs),
 }
 
 /// Arguments for the `explore` subcommand.
@@ -567,5 +570,45 @@ pub enum DistroCommands {
         /// Target architecture.
         #[arg(short, long, default_value = "x86_64")]
         arch: String,
+    },
+}
+
+/// Arguments for the `db` subcommand.
+#[derive(Args, Debug)]
+pub struct DbArgs {
+    /// Database connection URL (e.g. postgres://dbs:password@localhost:5432/dbs).
+    /// Overrides DATABASE_URL environment variable and configuration files.
+    #[arg(short = 'u', long = "url", global = true)]
+    pub database_url: Option<String>,
+
+    #[command(subcommand)]
+    pub command: DbCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DbCommands {
+    /// Initialize and bootstrap the database schema, tables, and seed data.
+    #[command(alias = "init")]
+    Bootstrap {
+        /// Force re-initialization even if existing tables are detected.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Check database connectivity, PostgreSQL server version, and table row counts.
+    Status,
+
+    /// Reset database: drop all tables/enums and reapply the clean schema.
+    Reset {
+        /// Force reset without interactive confirmation.
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Dump the embedded SQL schema (up or down) to stdout for manual DBA inspection.
+    DumpSchema {
+        /// Output the teardown (down.sql) schema instead of initialization (up.sql).
+        #[arg(long)]
+        down: bool,
     },
 }

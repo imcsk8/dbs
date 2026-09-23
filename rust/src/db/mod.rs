@@ -3,9 +3,11 @@
 //! Provides connection management, transaction handling, and CRUD operations for
 //! operating systems, packages, capability dependencies, and build artifacts.
 
+pub mod bootstrap;
+
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use eyre::{eyre, Result};
@@ -17,13 +19,23 @@ use crate::models::{
 use crate::schema::{operating_system, package, package_artifact, package_provides, package_requires};
 use crate::types::BuildStatus;
 
-/// Resolves `DATABASE_URL` from the environment or by reading `.env` if present.
+/// Resolves `DATABASE_URL` from the environment or by reading config/env files.
 pub fn get_database_url() -> Option<String> {
     if let Ok(url) = env::var("DATABASE_URL") {
         return Some(url);
     }
 
-    let candidates = [Path::new(".env"), Path::new("../.env")];
+    let mut candidates = vec![
+        PathBuf::from(".env"),
+        PathBuf::from("../.env"),
+        PathBuf::from("/etc/dbs/dbs.env"),
+        PathBuf::from("/etc/dbs/dbs.conf"),
+    ];
+
+    if let Ok(home) = env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(".config/dbs/config.env"));
+    }
+
     for path in &candidates {
         if path.exists() {
             if let Ok(content) = fs::read_to_string(path) {
@@ -45,15 +57,18 @@ pub fn get_database_url() -> Option<String> {
     None
 }
 
-/// Establishes a direct PostgreSQL connection using `DATABASE_URL`.
-pub fn establish_connection() -> Result<PgConnection> {
-    let database_url = match get_database_url() {
-        Some(url) => url,
-        None => {
-            return Err(eyre!(
-                "DATABASE_URL environment variable is not set. Please set it or create a .env file."
-            ))
-        }
+/// Establishes a direct PostgreSQL connection with an optional custom connection URL.
+pub fn establish_connection_with_url(custom_url: Option<&str>) -> Result<PgConnection> {
+    let database_url = match custom_url {
+        Some(url) => url.to_string(),
+        None => match get_database_url() {
+            Some(url) => url,
+            None => {
+                return Err(eyre!(
+                    "DATABASE_URL environment variable is not set. Please set it, pass '--url <URL>', or configure /etc/dbs/dbs.env or .env"
+                ))
+            }
+        },
     };
 
     match PgConnection::establish(&database_url) {
@@ -64,6 +79,11 @@ pub fn establish_connection() -> Result<PgConnection> {
             e
         )),
     }
+}
+
+/// Establishes a direct PostgreSQL connection using `DATABASE_URL`.
+pub fn establish_connection() -> Result<PgConnection> {
+    establish_connection_with_url(None)
 }
 
 /// Retrieves all registered operating system distribution records.

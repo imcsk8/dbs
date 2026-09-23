@@ -21,7 +21,7 @@ pub mod runner;
 pub mod schema;
 pub mod types;
 
-use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, DagArgs, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
+use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
 use dag::DependencyGraph;
 use distgit::provider::DistroConfig;
 use distgit::spec::{parse_spec_file, SpecMetadata};
@@ -44,6 +44,7 @@ async fn main() -> Result<()> {
         Commands::Chroot(args) => handle_chroot(args).await?,
         Commands::Lookaside(args) => handle_lookaside(args).await?,
         Commands::Distro(args) => handle_distro(args).await?,
+        Commands::Db(args) => handle_db(args).await?,
     }
 
     Ok(())
@@ -1150,4 +1151,78 @@ async fn handle_distro(args: DistroArgs) -> Result<()> {
 
     Ok(())
 }
+
+/// Dispatches the `db` subcommand for database bootstrapping, status check, reset, and dumping schema.
+async fn handle_db(args: DbArgs) -> Result<()> {
+    match args.command {
+        DbCommands::DumpSchema { down } => {
+            let sql = db::bootstrap::dump_schema(down);
+            print!("{}", sql);
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let mut conn = db::establish_connection_with_url(args.database_url.as_deref())?;
+
+    match args.command {
+        DbCommands::Bootstrap { force } => {
+            println!("===========================================================");
+            println!(" DBS Database Bootstrap");
+            println!("===========================================================");
+            db::bootstrap::bootstrap_database(&mut conn, force)?;
+            println!("-----------------------------------------------------------");
+            let status = db::bootstrap::get_database_status(&mut conn)?;
+            println!(" Database:                {}", status.database_name);
+            println!(" PostgreSQL:              {}", status.server_version.lines().next().unwrap_or(""));
+            println!(" Registered OS presets:   {}", status.os_count);
+            println!(" Supported architectures: {}", status.arch_count);
+            println!(" Package managers:        {}", status.pm_count);
+            println!(" Initial packages:        {}", status.package_count);
+            println!("===========================================================");
+        }
+
+        DbCommands::Status => {
+            println!("===========================================================");
+            println!(" DBS Database Status");
+            println!("===========================================================");
+            let status = db::bootstrap::get_database_status(&mut conn)?;
+            println!(" Database:         {}", status.database_name);
+            println!(" PostgreSQL:       {}", status.server_version.lines().next().unwrap_or(""));
+            println!(" Schema Status:    {}", if status.is_initialized { "INITIALIZED" } else { "NOT INITIALIZED" });
+            println!("-----------------------------------------------------------");
+            println!(" Operating Systems: {}", status.os_count);
+            println!(" Architectures:     {}", status.arch_count);
+            println!(" Package Managers:  {}", status.pm_count);
+            println!(" Packages:          {}", status.package_count);
+            println!(" Package Artifacts: {}", status.artifact_count);
+            println!("===========================================================");
+        }
+
+        DbCommands::Reset { force } => {
+            if !force {
+                return Err(eyre!(
+                    "Resetting the database will drop all tables and data. Pass '--force' to proceed."
+                ));
+            }
+            println!("===========================================================");
+            println!(" DBS Database Reset");
+            println!("===========================================================");
+            db::bootstrap::reset_database(&mut conn)?;
+            println!("-----------------------------------------------------------");
+            let status = db::bootstrap::get_database_status(&mut conn)?;
+            println!(" Database:         {}", status.database_name);
+            println!(" Initialized:      {}", if status.is_initialized { "YES" } else { "NO" });
+            println!(" Operating Systems: {}", status.os_count);
+            println!(" Architectures:     {}", status.arch_count);
+            println!(" Packages:          {}", status.package_count);
+            println!("===========================================================");
+        }
+
+        DbCommands::DumpSchema { .. } => unreachable!(),
+    }
+
+    Ok(())
+}
+
 

@@ -184,6 +184,7 @@ Automate end-to-end repository initialization, DAG compilation, repodata indexin
 | `dbs build` | `-r <chroot>`, `-j <workers>`, `--chain`, `--fetch-sources` | Compile packages in Mock or rpmbuild with auto-lookaside source caching and dynamic repo feedback. |
 | `dbs lookaside` | `upload`, `get`, `sync`, `status`, `gc` | Maintain Content-Addressable Storage (CAS) for source archives with BTRFS CoW reflinks. |
 | `dbs chroot` / `mock` | `list`, `inspect`, `check`, `add`, `init` | Discover, inspect, validate, and manage custom Mock chroot configurations. |
+| `dbs db` | `bootstrap`, `status`, `reset`, `dump-schema` | Bootstrap embedded database schema, inspect table health, reset, or export raw SQL. |
 | `dbs os` | `list`, `add`, `delete` | Manage operating system distribution definitions and presets. |
 | `dbs pkg` | `list`, `add`, `delete` | Query and manage packages in the PostgreSQL supply chain catalog. |
 
@@ -205,14 +206,21 @@ make release   # Compile optimized release binary into ./bin/dbs
 make clean     # Clean target and generated artifacts
 ```
 
-### Database Setup (Optional)
+### Database Provisioning & Management (Optional)
 
-DBS can track all packages, capabilities, and artifacts in a local PostgreSQL database:
+DBS can track all packages, capabilities, build durations, and artifacts in PostgreSQL.
+When distributing `dbs`, **no Makefile or loose SQL scripts are required**—the complete schema is embedded directly into the binary:
 
 ```bash
-make db        # Start PostgreSQL development container
-make bootstrap # Run database migrations up
-make clean_db  # Run database migrations down
+# 1. Bootstrap schema and default seeds (reads DATABASE_URL, /etc/dbs/dbs.env, or .env):
+./bin/dbs db bootstrap
+
+# 2. Check database connectivity, PostgreSQL version, and table counts:
+./bin/dbs db status
+
+# 3. Automated host or container provisioning:
+sudo ./scripts/setup_db.sh --mode host       # For native PostgreSQL on host
+./scripts/setup_db.sh --mode container      # For Podman container
 ```
 
 ---
