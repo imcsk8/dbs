@@ -1,6 +1,6 @@
 
-DB_USER="odoo"
-DB_NAME="odoo"
+DB_USER="dbs"
+DB_NAME="dbs"
 DB_PASSWORD="prueba123"
 DB_CONTAINER="dbs_pg"
 
@@ -29,7 +29,7 @@ stop-db:
 	podman stop $(DB_CONTAINER)
 
 .env:
-	echo "DATABASE_URL=postgres://dbs:prueba123!@127.0.0.1:5436/dbs" > .env
+	echo "DATABASE_URL=postgres://dbs:prueba123@127.0.0.1:9436/dbs" > .env
 
 bin:
 	mkdir -p bin
@@ -37,10 +37,14 @@ bin:
 release_dirs: bin
 
 clean_db:
-	sql/migrate.sh down
+	pushd sql
+	migrate.sh down
+	popd
 
 bootstrap:
+	pushd sql
 	sql/migrate.sh up
+	popd
 
 build:
 	make -C rust build
