@@ -1,7 +1,7 @@
 # Distribution Build System (DBS) - Agent Specifications & Context
 
 ## 1. Project Overview
-Welcome to the **Distribution Build System (DBS)** workspace (`/home/imcsk8/projects/gemini-workdir/dbs`). This document is the primary architectural guide and system context for **Antigravity CLI** (`agy`) agents operating within this repository.
+Welcome to the **Distribution Build System (DBS)** workspace. This document is the primary architectural guide and system context for **Antigravity CLI** (`agy`) agents operating within this repository.
 
 **DBS** is a high-throughput, distribution-agnostic Linux distribution build system written in Rust. It eliminates opaque, ad-hoc distribution bootstrapping scripts ("secret sauces") by providing a unified, declarative pipeline for discovering, synchronizing, inspecting, and compiling packages directly from **dist-git** repositories across any RPM-based distribution (Fedora Rawhide, CentOS Stream, TacOS, RHEL, etc.).
 
@@ -144,10 +144,10 @@ dbs chroot inspect tacos-rolling-x86_64
 
 # Check and validate a chroot configuration with Mock
 dbs chroot check tacos-rolling-x86_64
-dbs chroot check /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg
+dbs chroot check mock/tacos-rolling-x86_64.cfg
 
 # Import custom chroots into workspace (./mock)
-dbs chroot add /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg
+dbs chroot add ../tacos/mock/tacos-rolling-x86_64.cfg
 
 # Scaffold a new distribution chroot template
 dbs chroot init my-distro-x86_64 --arch x86_64

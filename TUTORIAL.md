@@ -265,7 +265,7 @@ Inspect `reports/dag_plan.md` to see:
 
 Mock provides clean chroot environments using DNF/RPM. It isolates the build process from the host system.
 
-DBS provides native support for discovering, validating, and compiling packages using **custom distribution chroot profiles** (such as `tacos-rolling-x86_64.cfg` with nested templates from `/home/imcsk8/projects/gemini-workdir/tacos/mock`).
+DBS provides native support for discovering, validating, and compiling packages using **custom distribution chroot profiles** (such as `tacos-rolling-x86_64.cfg` with nested templates from `mock/` or `../tacos/mock/`).
 
 ### Discovering & Validating Chroots
 
@@ -296,7 +296,7 @@ You can specify a chroot using either:
    ```
 2. **A direct file path:** DBS automatically extracts the parent directory as the Mock `--configdir` so all included templates resolve properly:
    ```bash
-   ./bin/dbs build -r /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg \
+   ./bin/dbs build -r mock/tacos-rolling-x86_64.cfg \
      -o staging data/distgit/lz4/lz4.spec
    ```
 
@@ -305,7 +305,7 @@ You can specify a chroot using either:
 To import an external chroot configuration and its `templates/` folder into your DBS workspace:
 
 ```bash
-./bin/dbs chroot add /home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg
+./bin/dbs chroot add ../tacos/mock/tacos-rolling-x86_64.cfg
 ```
 
 To scaffold a clean starter template for a new distribution:
@@ -534,7 +534,7 @@ By default, Linux limits an unprivileged UID to 16,384 pipe pages across all pro
 
 ### Applying the Tuning Profile
 
-DBS ships with a dedicated host sysctl configuration profile at [`config/sysctl/99-dbs-build-host.conf`](file:///home/imcsk8/projects/gemini-workdir/dbs/config/sysctl/99-dbs-build-host.conf):
+DBS ships with a dedicated host sysctl configuration profile at [`config/sysctl/99-dbs-build-host.conf`](config/sysctl/99-dbs-build-host.conf):
 
 ```ini
 # /etc/sysctl.d/99-dbs-build-host.conf
@@ -727,6 +727,6 @@ Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW
 
 ## Next Steps
 
-* Explore [AGENTS.md](file:///home/imcsk8/projects/gemini-workdir/dbs/AGENTS.md) for technical architecture details and developer guidelines.
-* Check [README.md](file:///home/imcsk8/projects/gemini-workdir/dbs/README.md) for quick command references and project overview.
-* Review the source code in [`rust/src/main.rs`](file:///home/imcsk8/projects/gemini-workdir/dbs/rust/src/main.rs) and [`rust/src/dag/mod.rs`](file:///home/imcsk8/projects/gemini-workdir/dbs/rust/src/dag/mod.rs).
+* Explore [AGENTS.md](AGENTS.md) for technical architecture details and developer guidelines.
+* Check [README.md](README.md) for quick command references and project overview.
+* Review the source code in [`rust/src/main.rs`](rust/src/main.rs) and [`rust/src/dag/mod.rs`](rust/src/dag/mod.rs).

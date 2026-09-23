@@ -191,7 +191,7 @@ Automate end-to-end repository initialization, DAG compilation, repodata indexin
 
 ## Hands-On Tutorial
 
-For a complete step-by-step walkthrough detailing how to create, re-remote, resolve dependencies, and compile packages for a distribution, see [TUTORIAL.md](file:///home/imcsk8/projects/gemini-workdir/dbs/TUTORIAL.md).
+For a complete step-by-step walkthrough detailing how to create, re-remote, resolve dependencies, and compile packages for a distribution, see [TUTORIAL.md](TUTORIAL.md).
 
 ---
 

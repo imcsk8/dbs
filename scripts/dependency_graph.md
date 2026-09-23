@@ -38,9 +38,9 @@ NetworkManager, awscli2, bootc, byteman, ceph, clevis, cockpit-image-builder, co
 ## 3. SQL Insert Statements File
 
 The complete SQL transaction to clear and populate the `package` and `package_dependencies` tables is located at:
-👉 **[package_inserts.sql](file:///home/imcsk8/projects/gemini-workdir/dbs/scripts/package_inserts.sql)**
+👉 **[package_inserts.sql](scripts/package_inserts.sql)**
 
 To execute this against your PostgreSQL database:
 ```bash
-psql "${DATABASE_URL}" -f /home/imcsk8/projects/gemini-workdir/dbs/scripts/package_inserts.sql
+psql "${DATABASE_URL}" -f scripts/package_inserts.sql
 ```

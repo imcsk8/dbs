@@ -83,11 +83,11 @@ impl ChrootResolver {
 
         // 2. Current workspace local mock directories
         paths.push(PathBuf::from("mock"));
+        paths.push(PathBuf::from("../mock"));
         paths.push(PathBuf::from("data/mock"));
 
         // 3. Known project / sibling workspace directories
         paths.push(PathBuf::from("../tacos/mock"));
-        paths.push(PathBuf::from("/home/imcsk8/projects/gemini-workdir/tacos/mock"));
 
         // 4. User configuration directory ($HOME/.config/mock and $HOME/.config/dbs/mock)
         if let Ok(home) = std::env::var("HOME") {
@@ -501,6 +501,9 @@ config_opts['description'] = 'Custom Distribution Chroot for {name}'
 
 config_opts['macros']['%dist'] = '.custom'
 config_opts['macros']['%vendor'] = '{name}'
+config_opts['macros']['%_smp_mflags'] = '-j2'
+config_opts['macros']['%_smp_build_ncpus'] = '2'
+config_opts['macros']['%_smp_ncpus_max'] = '2'
 
 config_opts['dnf.conf'] = """
 [main]
@@ -523,6 +526,15 @@ metalink=https://mirrors.fedoraproject.org/metalink?repo=rawhide&arch=$basearch
 gpgcheck=0
 enabled=1
 """
+
+# Build isolation and execution tuning
+config_opts['plugin_conf']['tmpfs_enable'] = True
+config_opts['plugin_conf']['tmpfs_opts']['required_ram_mb'] = 4096
+config_opts['plugin_conf']['tmpfs_opts']['keep_mounted'] = False
+
+# Grant capabilities and relax seccomp for low-level system testing (ptrace, sched, vmsplice)
+config_opts['seccomp'] = False
+config_opts['nspawn_args'] += ['--capability=CAP_SYS_PTRACE,CAP_SYS_ADMIN']
 "#,
             name = name
         );
@@ -613,16 +625,21 @@ include('templates/tacos-rolling.tpl')
 
     #[test]
     fn test_resolve_tacos_mock_direct_path() {
-        let tacos_cfg = PathBuf::from("/home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg");
+        let tacos_cfg = if Path::new("mock/tacos-rolling-x86_64.cfg").is_file() {
+            PathBuf::from("mock/tacos-rolling-x86_64.cfg")
+        } else if Path::new("../mock/tacos-rolling-x86_64.cfg").is_file() {
+            PathBuf::from("../mock/tacos-rolling-x86_64.cfg")
+        } else {
+            PathBuf::from("mock/tacos-rolling-x86_64.cfg")
+        };
         if tacos_cfg.is_file() {
             let resolved = ChrootResolver::resolve(tacos_cfg.to_str().unwrap(), None)
                 .expect("Failed to resolve direct tacos cfg path");
             assert_eq!(resolved.profile_name, "tacos-rolling-x86_64");
             assert!(resolved.config_dir.is_some());
-            assert_eq!(
-                resolved.config_dir.unwrap(),
-                PathBuf::from("/home/imcsk8/projects/gemini-workdir/tacos/mock")
-            );
+            let expected_dir = fs::canonicalize(tacos_cfg.parent().unwrap()).unwrap_or_else(|_| tacos_cfg.parent().unwrap().to_path_buf());
+            let actual_dir = fs::canonicalize(resolved.config_dir.as_ref().unwrap()).unwrap_or_else(|_| resolved.config_dir.unwrap());
+            assert_eq!(actual_dir, expected_dir);
         }
     }
 
@@ -637,7 +654,13 @@ include('templates/tacos-rolling.tpl')
 
     #[test]
     fn test_parse_tacos_mock_config() {
-        let tacos_cfg = PathBuf::from("/home/imcsk8/projects/gemini-workdir/tacos/mock/tacos-rolling-x86_64.cfg");
+        let tacos_cfg = if Path::new("mock/tacos-rolling-x86_64.cfg").is_file() {
+            PathBuf::from("mock/tacos-rolling-x86_64.cfg")
+        } else if Path::new("../mock/tacos-rolling-x86_64.cfg").is_file() {
+            PathBuf::from("../mock/tacos-rolling-x86_64.cfg")
+        } else {
+            PathBuf::from("mock/tacos-rolling-x86_64.cfg")
+        };
         if tacos_cfg.is_file() {
             let config = ChrootResolver::parse_config(&tacos_cfg);
             assert_eq!(config.name, "tacos-rolling-x86_64");
