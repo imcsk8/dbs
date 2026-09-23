@@ -101,27 +101,51 @@ impl DistGitClient {
             None => "https://src.fedoraproject.org/api/0",
         };
 
-        let url = format!("{}/projects", base_api);
-        let mut req = self.http.get(&url)
-            .query(&[("namespace", "rpms"), ("fork", "false")]);
-
-        if let Some(pattern) = search {
-            req = req.query(&[("pattern", pattern)]);
-        }
-        if let Some(lim) = limit {
-            let lim_str = lim.to_string();
-            req = req.query(&[("per_page", lim_str.as_str())]);
-        }
-
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(eyre!("Pagure API error {}: {}", resp.status(), resp.text().await?));
-        }
-
-        let body: serde_json::Value = resp.json().await?;
         let mut results = Vec::new();
+        let mut page = 1;
 
-        if let Some(projects) = body.get("projects").and_then(|p| p.as_array()) {
+        loop {
+            let per_page = match limit {
+                Some(lim) => {
+                    let remaining = lim.saturating_sub(results.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    remaining.min(100)
+                }
+                None => 100,
+            };
+
+            let url = format!("{}/projects", base_api);
+            let page_str = page.to_string();
+            let per_page_str = per_page.to_string();
+            let mut req = self.http.get(&url)
+                .query(&[
+                    ("namespace", "rpms"),
+                    ("fork", "false"),
+                    ("per_page", per_page_str.as_str()),
+                    ("page", page_str.as_str()),
+                ]);
+
+            if let Some(pattern) = search {
+                req = req.query(&[("pattern", pattern)]);
+            }
+
+            let resp = req.send().await?;
+            if !resp.status().is_success() {
+                return Err(eyre!("Pagure API error {}: {}", resp.status(), resp.text().await?));
+            }
+
+            let body: serde_json::Value = resp.json().await?;
+            let projects = match body.get("projects").and_then(|p| p.as_array()) {
+                Some(p) => p,
+                None => break,
+            };
+
+            if projects.is_empty() {
+                break;
+            }
+
             for proj in projects {
                 if let Some(name) = proj.get("name").and_then(|n| n.as_str()) {
                     let desc = proj.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
@@ -134,8 +158,25 @@ impl DistGitClient {
                         web_url,
                         git_url,
                     });
+
+                    if let Some(max) = limit {
+                        if results.len() >= max {
+                            return Ok(results);
+                        }
+                    }
                 }
             }
+
+            let has_next = body.get("pagination")
+                .and_then(|p| p.get("next"))
+                .map(|n| !n.is_null())
+                .unwrap_or(false);
+
+            if !has_next {
+                break;
+            }
+
+            page += 1;
         }
 
         Ok(results)
@@ -148,38 +189,69 @@ impl DistGitClient {
             None => "https://gitlab.com/api/v4/groups/8794173/projects",
         };
 
-        let per_page = limit.unwrap_or(50).min(100).to_string();
-        let mut req = self.http.get(base_api)
-            .query(&[("with_shared", "false"), ("per_page", per_page.as_str())]);
-
-        if let Some(pattern) = search {
-            req = req.query(&[("search", pattern)]);
-        }
-
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(eyre!("GitLab API error {}: {}", resp.status(), resp.text().await?));
-        }
-
-        let projects: Vec<serde_json::Value> = resp.json().await?;
         let mut results = Vec::new();
+        let mut page = 1;
 
-        for proj in projects {
-            if let Some(name) = proj.get("name").and_then(|n| n.as_str()) {
-                let desc = proj.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
-                let web_url = proj.get("web_url").and_then(|u| u.as_str()).map(|s| s.to_string());
-                let git_url = proj.get("http_url_to_repo")
-                    .and_then(|u| u.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| self.config.git_url_for_package(name));
+        loop {
+            let per_page = match limit {
+                Some(lim) => {
+                    let remaining = lim.saturating_sub(results.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    remaining.min(100)
+                }
+                None => 100,
+            };
 
-                results.push(DiscoveredProject {
-                    name: name.to_string(),
-                    description: desc,
-                    web_url,
-                    git_url,
-                });
+            let page_str = page.to_string();
+            let per_page_str = per_page.to_string();
+            let mut req = self.http.get(base_api)
+                .query(&[
+                    ("with_shared", "false"),
+                    ("per_page", per_page_str.as_str()),
+                    ("page", page_str.as_str()),
+                ]);
+
+            if let Some(pattern) = search {
+                req = req.query(&[("search", pattern)]);
             }
+
+            let resp = req.send().await?;
+            if !resp.status().is_success() {
+                return Err(eyre!("GitLab API error {}: {}", resp.status(), resp.text().await?));
+            }
+
+            let projects: Vec<serde_json::Value> = resp.json().await?;
+            if projects.is_empty() {
+                break;
+            }
+
+            for proj in projects {
+                if let Some(name) = proj.get("name").and_then(|n| n.as_str()) {
+                    let desc = proj.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
+                    let web_url = proj.get("web_url").and_then(|u| u.as_str()).map(|s| s.to_string());
+                    let git_url = proj.get("http_url_to_repo")
+                        .and_then(|u| u.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| self.config.git_url_for_package(name));
+
+                    results.push(DiscoveredProject {
+                        name: name.to_string(),
+                        description: desc,
+                        web_url,
+                        git_url,
+                    });
+
+                    if let Some(max) = limit {
+                        if results.len() >= max {
+                            return Ok(results);
+                        }
+                    }
+                }
+            }
+
+            page += 1;
         }
 
         Ok(results)
@@ -193,23 +265,48 @@ impl DistGitClient {
         };
 
         let url = format!("{}/repos/search", base_api);
-        let lim_str = limit.unwrap_or(50).to_string();
-        let mut req = self.http.get(&url)
-            .query(&[("limit", lim_str.as_str())]);
-
-        if let Some(q) = search {
-            req = req.query(&[("q", q)]);
-        }
-
-        let resp = req.send().await?;
-        if !resp.status().is_success() {
-            return Err(eyre!("Forgejo API error {}: {}", resp.status(), resp.text().await?));
-        }
-
-        let body: serde_json::Value = resp.json().await?;
         let mut results = Vec::new();
+        let mut page = 1;
 
-        if let Some(repos) = body.get("data").and_then(|d| d.as_array()) {
+        loop {
+            let per_page = match limit {
+                Some(lim) => {
+                    let remaining = lim.saturating_sub(results.len());
+                    if remaining == 0 {
+                        break;
+                    }
+                    remaining.min(50)
+                }
+                None => 50,
+            };
+
+            let page_str = page.to_string();
+            let per_page_str = per_page.to_string();
+            let mut req = self.http.get(&url)
+                .query(&[
+                    ("limit", per_page_str.as_str()),
+                    ("page", page_str.as_str()),
+                ]);
+
+            if let Some(q) = search {
+                req = req.query(&[("q", q)]);
+            }
+
+            let resp = req.send().await?;
+            if !resp.status().is_success() {
+                return Err(eyre!("Forgejo API error {}: {}", resp.status(), resp.text().await?));
+            }
+
+            let body: serde_json::Value = resp.json().await?;
+            let repos = match body.get("data").and_then(|d| d.as_array()) {
+                Some(r) => r,
+                None => break,
+            };
+
+            if repos.is_empty() {
+                break;
+            }
+
             for repo in repos {
                 if let Some(name) = repo.get("name").and_then(|n| n.as_str()) {
                     let desc = repo.get("description").and_then(|d| d.as_str()).map(|s| s.to_string());
@@ -225,8 +322,16 @@ impl DistGitClient {
                         web_url,
                         git_url,
                     });
+
+                    if let Some(max) = limit {
+                        if results.len() >= max {
+                            return Ok(results);
+                        }
+                    }
                 }
             }
+
+            page += 1;
         }
 
         Ok(results)
@@ -363,6 +468,42 @@ impl DistGitClient {
         })
     }
 
+    /// Synchronizes multiple dist-git repositories in parallel using Tokio tasks and worker throttling,
+    /// streaming completed items over a channel with (completed_index, total_count, Result<GitRepoStatus>).
+    pub async fn sync_batch_stream(
+        self: Arc<Self>,
+        packages: Vec<String>,
+        dest_dir: PathBuf,
+        concurrency: usize,
+    ) -> tokio::sync::mpsc::Receiver<(usize, usize, Result<GitRepoStatus>)> {
+        let total = packages.len();
+        let (tx, rx) = tokio::sync::mpsc::channel(concurrency * 2);
+        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let completed_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        tokio::spawn(async move {
+            for pkg in packages {
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => break,
+                };
+                let client = self.clone();
+                let dest = dest_dir.clone();
+                let tx_clone = tx.clone();
+                let counter = completed_counter.clone();
+
+                tokio::task::spawn_blocking(move || {
+                    let res = client.clone_or_pull(&pkg, &dest);
+                    drop(permit);
+                    let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let _ = tx_clone.blocking_send((idx, total, res));
+                });
+            }
+        });
+
+        rx
+    }
+
     /// Synchronizes multiple dist-git repositories in parallel using Tokio tasks and worker throttling.
     pub async fn sync_batch(
         self: Arc<Self>,
@@ -370,30 +511,11 @@ impl DistGitClient {
         dest_dir: PathBuf,
         concurrency: usize,
     ) -> Vec<Result<GitRepoStatus>> {
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-        let mut tasks = Vec::new();
-
-        for pkg in packages {
-            let sem = semaphore.clone();
-            let client = self.clone();
-            let dest = dest_dir.clone();
-
-            let task = tokio::task::spawn_blocking(move || {
-                let _permit = sem.acquire_many(1);
-                client.clone_or_pull(&pkg, &dest)
-            });
-
-            tasks.push(task);
-        }
-
+        let mut rx = self.sync_batch_stream(packages, dest_dir, concurrency).await;
         let mut results = Vec::new();
-        for task in tasks {
-            match task.await {
-                Ok(res) => results.push(res),
-                Err(e) => results.push(Err(eyre!("Worker thread panicked: {}", e))),
-            }
+        while let Some((_, _, res)) = rx.recv().await {
+            results.push(res);
         }
-
         results
     }
 

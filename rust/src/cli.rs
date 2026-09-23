@@ -79,9 +79,13 @@ pub struct ExploreArgs {
     #[arg(short, long)]
     pub search: Option<String>,
 
-    /// Maximum number of packages to return.
+    /// Maximum number of packages to return (ignored if --all is specified).
     #[arg(short, long, default_value = "25")]
     pub limit: usize,
+
+    /// Discover all available packages across all pages without limit.
+    #[arg(long)]
+    pub all: bool,
 }
 
 /// Arguments for the `distgit` subcommand.
@@ -152,9 +156,13 @@ pub enum DistgitCommands {
         #[arg(short, long)]
         search: Option<String>,
 
-        /// Limit on packages when discovering via search.
+        /// Limit on packages when discovering via search (ignored if --all is specified).
         #[arg(long, default_value = "50")]
         limit: usize,
+
+        /// Synchronize all available upstream repositories across all pages without limit.
+        #[arg(long)]
+        all: bool,
 
         /// Record synchronized packages and dependency capabilities into PostgreSQL database.
         #[arg(long)]

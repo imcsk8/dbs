@@ -13,10 +13,14 @@ Welcome to the hands-on tutorial for the **Distribution Build System (DBS)**. Th
 5. [Cloning, Re-branding, and Remote Management](#5-cloning-re-branding-and-remote-management)
 6. [Inspecting Package Metadata & Spec Files](#6-inspecting-package-metadata--spec-files)
 7. [Dependency Analysis with Kahn's DAG Engine](#7-dependency-analysis-with-kahns-dag-engine)
-8. [Hermetic Compilation with Mock](#8-hermetic-compilation-with-mock)
+8. [Hermetic Compilation with Mock & Custom Chroot Profiles](#8-hermetic-compilation-with-mock--custom-chroot-profiles)
 9. [Automated Layered Build Pipeline](#9-automated-layered-build-pipeline)
-10. [Supply Chain Database Tracking (Optional)](#10-supply-chain-database-tracking-optional)
-11. [Troubleshooting & Best Practices](#11-troubleshooting--best-practices)
+10. [Supply Chain Database Tracking & Database Provisioning](#10-supply-chain-database-tracking--database-provisioning)
+11. [Maintaining the Dist-Git Lookaside Cache (BTRFS CoW)](#11-maintaining-the-dist-git-lookaside-cache-btrfs-cow)
+12. [Host Kernel Tuning for High-Throughput Parallel Builds](#12-host-kernel-tuning-for-high-throughput-parallel-builds)
+13. [GPG Key Generation & Package Signing](#13-gpg-key-generation--package-signing)
+14. [Distribution Repository Lifecycle with `dbs distro`](#14-distribution-repository-lifecycle-with-dbs-distro)
+15. [Troubleshooting & Best Practices](#15-troubleshooting--best-practices)
 
 ---
 
@@ -836,9 +840,34 @@ DBS provides a unified `dbs distro` command suite to automate initialization, bu
   --dest /srv/dbs/tacos/distro
 ```
 
-### 2. End-to-End Build & Publish
-Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW reflinks, compiles in Mock with dynamic repository feedback, and publishes the finished RPMs:
+### 2. Synchronize All Upstream Dist-Git Repositories
+Before compiling the distribution, clone and synchronize all package specifications and git trees from Fedora Rawhide into your distribution repository destination (`/srv/dbs/tacos/rpm` as declared in `tacos.toml`):
+
 ```bash
+# Clone all upstream package repositories with 16 parallel workers
+./bin/dbs --config tacos.toml distgit sync --all -j 16
+```
+
+> [!TIP]
+> **Production Recommendation:**
+> Fedora Rawhide dist-git contains **42,308 package repositories** (~25–40 GB on disk with shallow `--depth=1` clones).
+> Because downloading 42,000+ git repositories involves tens of thousands of network requests, it is strongly recommended to run this inside a persistent terminal multiplexer (`tmux` or `screen`):
+> ```bash
+> tmux new -s distgit-sync
+> ./bin/dbs --config tacos.toml distgit sync --all -j 16
+> ```
+> 
+> * Do not pass `--sources` during an `--all` sync to avoid downloading petabytes of source tarballs from the upstream lookaside cache. DBS will dynamically pull the required source tarballs on demand during the build phase (`dbs distro build`).
+> * Re-running this command is fully idempotent: existing repositories in `/srv/dbs/tacos/rpm` will be updated via `git fetch --depth=1` instead of cloned again.
+
+### 3. End-to-End Build & Publish
+Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW reflinks, compiles in Mock with dynamic repository feedback, and publishes the finished RPMs:
+
+```bash
+# Using tacos.toml:
+./bin/dbs --config tacos.toml distro build
+
+# Or explicitly specifying flags:
 ./bin/dbs distro build tacos-stable-x86_64 \
   --path /srv/dbs/tacos/rpm \
   --lookaside-dir /srv/dbs/lookaside \
@@ -847,8 +876,12 @@ Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW
   --sign-key release@tacos.org.mx
 ```
 
-### 3. Publish & Index Existing Staging Artifacts
+### 4. Publish & Index Existing Staging Artifacts
 ```bash
+# Using tacos.toml:
+./bin/dbs --config tacos.toml distro publish
+
+# Or explicitly specifying flags:
 ./bin/dbs distro publish tacos-stable-x86_64 \
   --staging-dir /srv/dbs/tacos/staging \
   --dest /srv/dbs/tacos/distro \
@@ -856,20 +889,26 @@ Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW
   --sign-key release@tacos.org.mx
 ```
 
-### 4. Check Repository Health & Metrics
+### 5. Check Repository Health & Metrics
 ```bash
+# Using tacos.toml:
+./bin/dbs --config tacos.toml distro status
+
+# Or explicitly specifying flags:
 ./bin/dbs distro status tacos-stable-x86_64 --dest /srv/dbs/tacos/distro
 ```
 
-### 5. Expose via Web Server
+### 6. Expose via Web Server
 * **Generate Nginx configuration file:**
   ```bash
-  ./bin/dbs distro serve --path /srv/dbs/tacos/distro --nginx-conf /etc/nginx/conf.d/tacos.conf
+  # Using tacos.toml:
+  ./bin/dbs --config tacos.toml distro serve --nginx-conf /etc/nginx/conf.d/tacos.conf
   sudo nginx -t && sudo systemctl reload nginx
   ```
 * **Or launch the built-in async HTTP file server for instant testing:**
   ```bash
-  ./bin/dbs distro serve --path /srv/dbs/tacos/distro --port 8080
+  # Using tacos.toml:
+  ./bin/dbs --config tacos.toml distro serve --port 8080
   ```
 
 ---

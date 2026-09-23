@@ -85,7 +85,8 @@ async fn handle_explore(args: ExploreArgs) -> Result<()> {
     println!("===========================================================");
 
     let client = DistGitClient::new(config);
-    let projects = client.explore(args.search.as_deref(), Some(args.limit)).await?;
+    let query_limit = if args.all { None } else { Some(args.limit) };
+    let projects = client.explore(args.search.as_deref(), query_limit).await?;
 
     if projects.is_empty() {
         println!("No projects or packages found matching query.");
@@ -193,7 +194,7 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             }
         }
 
-        DistgitCommands::Sync { distro, dest, concurrency, sources, search, limit, record_db, lookaside_dir } => {
+        DistgitCommands::Sync { distro, dest, concurrency, sources, search, limit, all, record_db, lookaside_dir } => {
             let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
             let concurrency = concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
@@ -205,8 +206,13 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             let client = Arc::new(DistGitClient::new(config));
             let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
 
-            println!("Discovering packages in {} matching query '{:?}'...", distro, search);
-            let projects = client.explore(search.as_deref(), Some(limit)).await?;
+            let query_limit = if all { None } else { Some(limit) };
+            if all {
+                println!("Discovering all packages in {} across all pages...", distro);
+            } else {
+                println!("Discovering packages in {} matching query '{:?}' (limit: {})...", distro, search, limit);
+            }
+            let projects = client.explore(search.as_deref(), query_limit).await?;
             if projects.is_empty() {
                 println!("No packages found to synchronize.");
                 return Ok(());
@@ -228,16 +234,17 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             };
 
             let pkg_names: Vec<String> = projects.into_iter().map(|p| p.name).collect();
-            println!("Synchronizing {} repository(ies) with {} workers into {}...", pkg_names.len(), concurrency, dest.display());
+            let total = pkg_names.len();
+            println!("Synchronizing {} repository(ies) with {} workers into {}...", total, concurrency, dest.display());
 
-            let results = client.clone().sync_batch(pkg_names, dest.clone(), concurrency).await;
+            let mut rx = client.clone().sync_batch_stream(pkg_names, dest.clone(), concurrency).await;
             let mut success_count = 0;
 
-            for res in results {
+            while let Some((idx, total_pkgs, res)) = rx.recv().await {
                 match res {
                     Ok(status) => {
                         success_count += 1;
-                        println!("✓ {} -> {} (commit: {:.8})", status.package_name, status.spec_meta.name, status.commit_hash);
+                        println!("[{}/{}] ✓ {} -> {} (commit: {:.8})", idx, total_pkgs, status.package_name, status.spec_meta.name, status.commit_hash);
 
                         if let Some(conn) = &mut db_conn {
                             match db::record_synced_package(conn, &status.spec_meta, &distro, &status.branch, &status.commit_hash) {
@@ -256,11 +263,11 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
                             }
                         }
                     }
-                    Err(e) => eprintln!("✗ Sync error: {}", e),
+                    Err(e) => eprintln!("[{}/{}] ✗ Sync error: {}", idx, total_pkgs, e),
                 }
             }
 
-            println!("Completed: {}/{} repositories synchronized successfully.", success_count, limit);
+            println!("Completed: {}/{} repositories synchronized successfully.", success_count, total);
         }
 
         DistgitCommands::Inspect { path } => {
