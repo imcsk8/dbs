@@ -14,6 +14,9 @@ config_opts['channel'] = 'stable'
 config_opts['macros']['%dist'] = '.tcrs'
 config_opts['macros']['%tacos'] = '1'
 config_opts['macros']['%vendor'] = 'TacOS'
+config_opts['macros']['%_smp_mflags'] = '-j2'
+config_opts['macros']['%_smp_build_ncpus'] = '2'
+config_opts['macros']['%_smp_ncpus_max'] = '2'
 
 # https://fedoraproject.org/wiki/Changes/BuildWithDNF5
 config_opts['package_manager'] = 'dnf5'
@@ -98,3 +101,12 @@ gpgcheck=0
 enabled=1
 
 """
+
+# Build isolation and execution tuning
+config_opts['plugin_conf']['tmpfs_enable'] = True
+config_opts['plugin_conf']['tmpfs_opts']['required_ram_mb'] = 4096
+config_opts['plugin_conf']['tmpfs_opts']['keep_mounted'] = False
+
+# Grant capabilities and relax seccomp for low-level system testing (ptrace, sched, vmsplice)
+config_opts['seccomp'] = False
+config_opts['nspawn_args'] += ['--capability=CAP_SYS_PTRACE,CAP_SYS_ADMIN']
