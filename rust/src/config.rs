@@ -129,6 +129,14 @@ pub struct DistgitConfig {
     /// Concurrency workers for parallel git operations and downloads.
     #[serde(default = "default_workers")]
     pub concurrency: usize,
+
+    /// Base URL of new origin git remote to automatically configure for synced repos (e.g. https://codeberg.org/imcsk8/tacos).
+    #[serde(default)]
+    pub new_top_origin: Option<String>,
+
+    /// Optional API key / personal access token for dist-git forge authentication.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 fn default_distgit_distro() -> String {
@@ -154,6 +162,8 @@ impl Default for DistgitConfig {
             dest: default_distgit_dest(),
             lookaside_dir: default_lookaside_dir(),
             concurrency: default_workers(),
+            new_top_origin: None,
+            api_key: None,
         }
     }
 }
@@ -344,6 +354,13 @@ lookaside_dir = "/srv/dbs/lookaside"
 # Parallel concurrency for git clone and synchronization
 concurrency = 4
 
+# Base URL of new origin git remote to automatically configure for synced repos
+# e.g. https://codeberg.org/imcsk8/tacos will configure https://codeberg.org/imcsk8/tacos/<package>
+# new_top_origin = "https://codeberg.org/imcsk8/tacos"
+
+# Optional API token / key for authenticating with dist-git forge APIs
+# api_key = ""
+
 [distro]
 # Target distribution identifier
 name = "tacos-stable-x86_64"
@@ -433,5 +450,18 @@ mod tests {
     fn test_load_explicit_nonexistent() {
         let result = DbsConfig::load(Some(Path::new("/nonexistent/path/dbs.toml")));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_deserialize_new_top_origin_and_api_key() {
+        let toml_data = r#"
+        [distgit]
+        distro = "fedora-rawhide"
+        new_top_origin = "https://codeberg.org/imcsk8/tacos"
+        api_key = "secret_forge_token"
+        "#;
+        let parsed: DbsConfig = toml::from_str(toml_data).expect("Failed to parse TOML");
+        assert_eq!(parsed.distgit.new_top_origin.as_deref(), Some("https://codeberg.org/imcsk8/tacos"));
+        assert_eq!(parsed.distgit.api_key.as_deref(), Some("secret_forge_token"));
     }
 }

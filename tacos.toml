@@ -37,6 +37,12 @@ lookaside_dir = "/srv/dbs/lookaside"
 # Parallel concurrency for git clone and synchronization
 concurrency = 4
 
+# Base URL of new origin git remote to automatically configure for synced repos
+new_top_origin = "https://codeberg.org/imcsk8/tacos"
+
+# Optional API token / key for authenticating with dist-git forge APIs
+# api_key = ""
+
 [distro]
 # Target distribution identifier
 name = "tacos-stable-x86_64"

@@ -64,12 +64,27 @@ pub enum Commands {
     /// Manage database lifecycle, schema bootstrap, status, reset, and SQL schema dumps.
     Db(DbArgs),
 
+    /// Launch interactive terminal UI package browser (shorthand for `dbs explore -i`).
+    Browse(ExploreArgs),
+
+    /// Interactive live TUI dashboard monitoring distribution, lookaside cache, mock chroots, and database.
+    #[command(alias = "top", alias = "dashboard")]
+    Monitor(MonitorArgs),
+
     /// Manage, view, and initialize DBS TOML configuration files.
     Config(ConfigArgs),
 }
 
+/// Arguments for the `monitor` / `top` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct MonitorArgs {
+    /// Distribution name or repository to monitor (defaults to config or tacos).
+    #[arg(short, long)]
+    pub distro: Option<String>,
+}
+
 /// Arguments for the `explore` subcommand.
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct ExploreArgs {
     /// Distribution name or preset to search (e.g. fedora-rawhide, centos-stream-10, centos-stream-9, tacos).
     #[arg(short, long, default_value = "fedora-rawhide")]
@@ -86,6 +101,14 @@ pub struct ExploreArgs {
     /// Discover all available packages across all pages without limit.
     #[arg(long)]
     pub all: bool,
+
+    /// Launch interactive terminal UI (TUI) package browser.
+    #[arg(short = 'i', long)]
+    pub interactive: bool,
+
+    /// Optional API token / key for authenticating with dist-git forge APIs.
+    #[arg(long, env = "DBS_DISTGIT_API_KEY")]
+    pub api_key: Option<String>,
 }
 
 /// Arguments for the `distgit` subcommand.
@@ -118,6 +141,14 @@ pub enum DistgitCommands {
         /// Set upstream git remote and configure origin for new repository (e.g. Codeberg/Forgejo).
         #[arg(long)]
         new_origin: Option<String>,
+
+        /// Base URL of new origin git remote (e.g. https://codeberg.org/imcsk8/tacos).
+        #[arg(long)]
+        new_top_origin: Option<String>,
+
+        /// Optional API token / key for authenticating with dist-git forge APIs.
+        #[arg(long, env = "DBS_DISTGIT_API_KEY")]
+        api_key: Option<String>,
 
         /// Package names to clone (supports 'upstream_pkg' or 'upstream_pkg:target_name').
         #[arg(required = true)]
@@ -171,6 +202,14 @@ pub enum DistgitCommands {
         /// Path to the local lookaside cache directory for instant BTRFS CoW staging.
         #[arg(long, env = "DBS_LOOKASIDE_DIR")]
         lookaside_dir: Option<PathBuf>,
+
+        /// Base URL of new origin git remote to automatically configure for each synced repo (e.g. https://codeberg.org/imcsk8/tacos).
+        #[arg(long)]
+        new_top_origin: Option<String>,
+
+        /// Optional API token / key for authenticating with dist-git forge APIs.
+        #[arg(long, env = "DBS_DISTGIT_API_KEY")]
+        api_key: Option<String>,
     },
 
     /// Inspect a `.spec` file or local dist-git repository and display parsed metadata.

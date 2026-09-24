@@ -92,6 +92,8 @@ The compiled binary will be placed at `./bin/dbs`. Verify the CLI:
 You will see the main command options:
 * `config`: View resolved settings and initialize starter configuration files.
 * `explore`: Search packages across upstream dist-git platforms.
+* `browse`: Launch interactive terminal UI package browser (shorthand for `dbs explore -i`).
+* `monitor`: Interactive live TUI dashboard monitoring distribution, lookaside cache, mock chroots, and database (`top`, `dashboard`).
 * `distgit`: Clone, pull, sync, and inspect dist-git repositories.
 * `dag`: Analyze dependencies and compute topological build layers.
 * `build`: Compile packages using Mock or rpmbuild.
@@ -119,7 +121,7 @@ Generate a starter configuration:
 The configuration defines four core subsystem sections:
 * `[database]`: PostgreSQL URL (`postgres://...`) and metric recording flags (`record_db = false`).
 * `[chroot]`: Default chroot profile (`profile = "tacos-rolling-x86_64"`), search paths, architecture (`x86_64`), and SMP CPU flags (`smp_cpus = 2`).
-* `[distgit]`: Default upstream distribution (`distro = "fedora-rawhide"`), workspace destination (`dest = "/srv/dbs/tacos/rpm"`), lookaside directory (`lookaside_dir = "/srv/dbs/lookaside"`), and concurrency.
+* `[distgit]`: Default upstream distribution (`distro = "fedora-rawhide"`), workspace destination (`dest = "/srv/dbs/tacos/rpm"`), lookaside directory (`lookaside_dir = "/srv/dbs/lookaside"`), `new_top_origin` (downstream forge base URL e.g. `https://codeberg.org/imcsk8/tacos`), `api_key` (forge API token), and concurrency.
 * `[distro]`: Target distribution name (`name = "tacos-stable-x86_64"`), destination repo path (`dest = "/srv/dbs/tacos/distro"`), staging directory, signing key, and HTTP repository server options.
 
 You can explicitly point DBS to any configuration file using the global `--config` (`-c`) flag:
@@ -133,6 +135,13 @@ You can explicitly point DBS to any configuration file using the global `--confi
 ## 4. Exploring Upstream Dist-Git Repositories
 
 DBS allows you to query dist-git platforms remotely using their native APIs (Pagure for Fedora, GitLab for CentOS Stream, Forgejo for TacOS/Codeberg).
+
+> [!NOTE]
+> **Fedora Package Infrastructure & API Keys:**
+> * **Package Catalog:** [packages.fedoraproject.org](https://packages.fedoraproject.org) serves as Fedora's official web catalog and search engine. Each package page provides direct links to its upstream dist-git source repository.
+> * **Dist-Git Repositories:** Fedora's active RPM Git trees reside on `https://src.fedoraproject.org/rpms/{package}.git`.
+> * **Fedora Forge:** [forge.fedoraproject.org](https://forge.fedoraproject.org) is a Forgejo instance dedicated to Fedora SIGs, subprojects, and tooling; it does **not** house the RPM dist-git trees.
+> * **API Key Requirement:** **No API key is required** for exploring, searching, or cloning public Fedora dist-git packages. However, DBS supports `--api-key` (CLI) and `[distgit].api_key` (TOML) for authenticated environments, private package forges, or elevated rate limits.
 
 ### Search Fedora Rawhide (Pagure API)
 
@@ -155,6 +164,47 @@ Found 2 packages:
 ```bash
 ./bin/dbs explore --distro centos-stream-10 --search python --limit 5
 ```
+
+### Interactive Remote Package Browser TUI (`dbs browse` or `dbs explore -i`)
+
+For a richer pair-programming and packaging workflow, DBS provides an interactive terminal UI powered by **Charmed Rust** (`bubbletea`, `lipgloss`):
+
+```bash
+# Launch interactive package browser
+./bin/dbs browse
+
+# Or explore a specific distribution with an initial search filter
+./bin/dbs explore --distro fedora-rawhide --search kernel -i
+```
+
+**Keybindings:**
+* `↑` / `↓` or `j` / `k`: Scroll through package lists
+* `/`: Activate instant search / filter
+* `c`: Trigger background clone/pull of the selected package into your target RPM directory (`/srv/dbs/tacos/rpm`)
+* `s`: Cycle upstream distribution presets (`fedora-rawhide` ↔ `centos-stream-10` ↔ `centos-stream-9` ↔ `tacos`)
+* `q` / `Esc`: Exit browser
+
+---
+
+### Interactive Live System Telemetry Dashboard (`dbs monitor` / `dbs top`)
+
+Monitor the live state of all DBS subsystems in a consolidated dashboard:
+
+```bash
+# Launch the live DBS monitor
+./bin/dbs monitor
+
+# Or using the top alias
+./bin/dbs top
+```
+
+**Tabs & Telemetry:**
+* **[1] Overview:** 4-quadrant health summary of Distribution Repo, Lookaside CAS, Mock Chroots, and PostgreSQL database.
+* **[2] Distro Repo:** Binary/Source RPM counts, repodata validation, and client configuration status.
+* **[3] Lookaside CAS:** Content-addressable storage metrics, BTRFS reflink CoW deduplication, and cached archives.
+* **[4] Mock Chroots:** Discovered build chroot profiles, target architectures, and package manager engine (`dnf5`).
+* **[5] Database:** PostgreSQL cataloged packages, supply chain artifacts, and operating systems.
+* **Controls:** `1`-`5` / `Tab` to switch views, `r` to refresh, `q` to quit.
 
 ---
 
@@ -210,6 +260,21 @@ This will:
 1. Clone `fedora-release` into `data/distgit/tacos-release`.
 2. Rename `fedora-release.spec` to `tacos-release.spec`.
 3. Set `origin` to `https://codeberg.org/imcsk8/tacos/tacos-release.git` and `upstream` to Fedora.
+
+### Scenario D: Automatic Downstream Origin (`--new-top-origin`)
+
+When cloning packages and automatically configuring their downstream Git remote (`origin`) without specifying each repository URL individually, pass `--new-top-origin`:
+
+```bash
+./bin/dbs distgit clone --distro fedora-rawhide strace \
+  --new-top-origin https://codeberg.org/imcsk8/tacos
+```
+
+DBS automatically resolves the repository URLs:
+* `origin`: `https://codeberg.org/imcsk8/tacos/strace`
+* `upstream`: `https://src.fedoraproject.org/rpms/strace.git`
+
+If configured in your TOML file (e.g. `[distgit].new_top_origin = "https://codeberg.org/imcsk8/tacos"` in `tacos.toml`), this remote structure is applied automatically.
 
 ---
 
@@ -847,6 +912,10 @@ Before compiling the distribution, clone and synchronize all package specificati
 # Clone all upstream package repositories with 16 parallel workers
 ./bin/dbs --config tacos.toml distgit sync --all -j 16
 ```
+
+With `new_top_origin = "https://codeberg.org/imcsk8/tacos"` configured in `tacos.toml` (or supplied via `--new-top-origin https://codeberg.org/imcsk8/tacos`), DBS automatically wires the Git remotes for every synchronized package:
+* `origin`: Downstream forge URL (e.g. `https://codeberg.org/imcsk8/tacos/<package>`)
+* `upstream`: Fedora Rawhide dist-git URL (e.g. `https://src.fedoraproject.org/rpms/<package>.git`)
 
 > [!TIP]
 > **Production Recommendation:**

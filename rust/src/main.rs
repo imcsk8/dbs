@@ -20,9 +20,10 @@ pub mod lookaside;
 pub mod models;
 pub mod runner;
 pub mod schema;
+pub mod tui;
 pub mod types;
 
-use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, ConfigArgs, ConfigCommands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, OsArgs, PkgArgs};
+use cli::{BuildArgs, ChrootArgs, ChrootCommands, Cli, Commands, ConfigArgs, ConfigCommands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs};
 use config::DbsConfig;
 use dag::DependencyGraph;
 use distgit::provider::DistroConfig;
@@ -31,6 +32,7 @@ use distgit::DistGitClient;
 use distro::{generate_nginx_config, get_distro_status, init_distro, publish_distro, run_http_server, DistroInitOptions, DistroPublishOptions};
 use lookaside::LookasideManager;
 use runner::{BuildOutput, BuildRunner, MockRunner, RpmbuildRunner};
+use tui::{run_explorer, run_monitor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,7 +48,12 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Explore(args) => handle_explore(args).await?,
+        Commands::Explore(args) => handle_explore(args, &dbs_cfg).await?,
+        Commands::Browse(mut args) => {
+            args.interactive = true;
+            handle_explore(args, &dbs_cfg).await?
+        }
+        Commands::Monitor(args) => handle_monitor(args, &dbs_cfg).await?,
         Commands::Distgit(args) => handle_distgit(args, &dbs_cfg).await?,
         Commands::Build(args) => handle_build(args, &dbs_cfg).await?,
         Commands::Os(args) => handle_os(args, &dbs_cfg).await?,
@@ -63,7 +70,7 @@ async fn main() -> Result<()> {
 }
 
 /// Dispatches the `explore` subcommand to discover remote packages in dist-git.
-async fn handle_explore(args: ExploreArgs) -> Result<()> {
+async fn handle_explore(args: ExploreArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     let config = match DistroConfig::from_preset(&args.distro) {
         Some(cfg) => cfg,
         None => {
@@ -75,6 +82,18 @@ async fn handle_explore(args: ExploreArgs) -> Result<()> {
         }
     };
 
+    let effective_api_key = args.api_key.or_else(|| dbs_cfg.distgit.api_key.clone());
+    let client = DistGitClient::new(config.clone()).with_api_key(effective_api_key);
+    let query_limit = if args.all { None } else { Some(args.limit) };
+
+    if args.interactive {
+        let initial_limit = query_limit.or(Some(100));
+        let initial_projects = client.explore(args.search.as_deref(), initial_limit).await?;
+        let target_rpm_dir = dbs_cfg.distgit.dest.clone();
+        run_explorer(config, target_rpm_dir, initial_projects, args.search.as_deref()).await?;
+        return Ok(());
+    }
+
     println!("===========================================================");
     println!(" DBS Remote Package Explorer");
     println!(" Target:    {} ({})", config.name, config.version);
@@ -84,8 +103,6 @@ async fn handle_explore(args: ExploreArgs) -> Result<()> {
     }
     println!("===========================================================");
 
-    let client = DistGitClient::new(config);
-    let query_limit = if args.all { None } else { Some(args.limit) };
     let projects = client.explore(args.search.as_deref(), query_limit).await?;
 
     if projects.is_empty() {
@@ -111,15 +128,32 @@ async fn handle_explore(args: ExploreArgs) -> Result<()> {
     Ok(())
 }
 
+/// Dispatches the `monitor` / `top` subcommand for live interactive system telemetry.
+async fn handle_monitor(args: MonitorArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    run_monitor(dbs_cfg.clone(), args.distro).await?;
+    Ok(())
+}
+
 /// Dispatches the `distgit` subcommand for cloning, pulling, syncing, and inspecting.
 async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
-        DistgitCommands::Clone { distro, dest, rename_as, rename_spec, new_origin, packages } => {
+        DistgitCommands::Clone {
+            distro,
+            dest,
+            rename_as,
+            rename_spec,
+            new_origin,
+            new_top_origin,
+            api_key,
+            packages,
+        } => {
             let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
             let config = DistroConfig::from_preset(&distro)
                 .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
-            let client = DistGitClient::new(config);
+            let effective_api_key = api_key.or_else(|| dbs_cfg.distgit.api_key.clone());
+            let client = DistGitClient::new(config).with_api_key(effective_api_key);
+            let effective_top_origin = new_top_origin.or_else(|| dbs_cfg.distgit.new_top_origin.clone());
 
             println!("Cloning {} package(s) from {} to {}...", packages.len(), distro, dest.display());
             for item in packages {
@@ -135,19 +169,24 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
                     println!("Cloning upstream '{}' as '{}'...", source_pkg, target_name);
                 }
 
-                match client.clone_or_pull_as(source_pkg, target_name, &dest, rename_spec, new_origin.as_deref()) {
+                let resolved_origin = if let Some(orig) = &new_origin {
+                    Some(orig.clone())
+                } else if let Some(top) = &effective_top_origin {
+                    if top.contains("{package}") {
+                        Some(top.replace("{package}", target_name))
+                    } else {
+                        Some(format!("{}/{}", top.trim_end_matches('/'), target_name))
+                    }
+                } else {
+                    None
+                };
+
+                match client.clone_or_pull_as(source_pkg, target_name, &dest, rename_spec, resolved_origin.as_deref()) {
                     Ok(status) => {
                         println!("✓ Cloned {} -> {} (branch: {}, commit: {:.8})", source_pkg, status.package_name, status.branch, status.commit_hash);
                         println!("  Spec: {} ({}-{})", status.spec_path.display(), status.spec_meta.version, status.spec_meta.release);
-                        if let Some(origin_template) = &new_origin {
-                            let final_origin = if origin_template.contains("{package}") {
-                                origin_template.replace("{package}", target_name)
-                            } else if origin_template.ends_with('/') {
-                                format!("{}{}.git", origin_template, target_name)
-                            } else {
-                                origin_template.clone()
-                            };
-                            println!("  Git Remote 'origin':   {}", final_origin);
+                        if let Some(orig) = &resolved_origin {
+                            println!("  Git Remote 'origin':   {}", orig);
                             println!("  Git Remote 'upstream': {}", client.config().git_url_for_package(source_pkg));
                         }
                     }
@@ -194,16 +233,30 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             }
         }
 
-        DistgitCommands::Sync { distro, dest, concurrency, sources, search, limit, all, record_db, lookaside_dir } => {
+        DistgitCommands::Sync {
+            distro,
+            dest,
+            concurrency,
+            sources,
+            search,
+            limit,
+            all,
+            record_db,
+            lookaside_dir,
+            new_top_origin,
+            api_key,
+        } => {
             let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
             let concurrency = concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
             let lookaside_dir = lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
             let record_db = record_db || dbs_cfg.database.record_db;
+            let effective_top_origin = new_top_origin.or_else(|| dbs_cfg.distgit.new_top_origin.clone());
+            let effective_api_key = api_key.or_else(|| dbs_cfg.distgit.api_key.clone());
 
             let config = DistroConfig::from_preset(&distro)
                 .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
-            let client = Arc::new(DistGitClient::new(config));
+            let client = Arc::new(DistGitClient::new(config).with_api_key(effective_api_key));
             let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
 
             let query_limit = if all { None } else { Some(limit) };
@@ -236,8 +289,11 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             let pkg_names: Vec<String> = projects.into_iter().map(|p| p.name).collect();
             let total = pkg_names.len();
             println!("Synchronizing {} repository(ies) with {} workers into {}...", total, concurrency, dest.display());
+            if let Some(top) = &effective_top_origin {
+                println!("Automatically configuring new origin remotes based on: {}/<package>", top.trim_end_matches('/'));
+            }
 
-            let mut rx = client.clone().sync_batch_stream(pkg_names, dest.clone(), concurrency).await;
+            let mut rx = client.clone().sync_batch_stream(pkg_names, dest.clone(), concurrency, effective_top_origin.clone()).await;
             let mut success_count = 0;
 
             while let Some((idx, total_pkgs, res)) = rx.recv().await {
@@ -245,6 +301,14 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
                     Ok(status) => {
                         success_count += 1;
                         println!("[{}/{}] ✓ {} -> {} (commit: {:.8})", idx, total_pkgs, status.package_name, status.spec_meta.name, status.commit_hash);
+                        if let Some(top) = &effective_top_origin {
+                            let origin_url = if top.contains("{package}") {
+                                top.replace("{package}", &status.package_name)
+                            } else {
+                                format!("{}/{}", top.trim_end_matches('/'), status.package_name)
+                            };
+                            println!("    * Configured origin remote: {}", origin_url);
+                        }
 
                         if let Some(conn) = &mut db_conn {
                             match db::record_synced_package(conn, &status.spec_meta, &distro, &status.branch, &status.commit_hash) {

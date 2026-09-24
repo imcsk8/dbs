@@ -20,6 +20,9 @@ sha2 = "0.10"
 hex = "0.4"
 libc = "0.2"
 toml = "1.1.6"
+charmed-bubbletea = { version = "0.2.4", features = ["async"] }
+charmed-lipgloss = "0.2.4"
+charmed-bubbles = "0.2.4"
 
 [dev-dependencies]
 tempfile = "3"

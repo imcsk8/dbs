@@ -53,6 +53,8 @@ pub struct DistGitClient {
     config: DistroConfig,
     /// HTTP client for API and lookaside downloads.
     http: reqwest::Client,
+    /// Optional API key / token for authenticated requests.
+    api_key: Option<String>,
 }
 
 impl DistGitClient {
@@ -64,7 +66,17 @@ impl DistGitClient {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        Self { config, http }
+        Self {
+            config,
+            http,
+            api_key: None,
+        }
+    }
+
+    /// Sets an API key / token for authenticating API requests.
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key;
+        self
     }
 
     /// Accesses the target distribution configuration.
@@ -129,6 +141,10 @@ impl DistGitClient {
 
             if let Some(pattern) = search {
                 req = req.query(&[("pattern", pattern)]);
+            }
+
+            if let Some(key) = &self.api_key {
+                req = req.header("Authorization", format!("token {}", key));
             }
 
             let resp = req.send().await?;
@@ -217,6 +233,10 @@ impl DistGitClient {
                 req = req.query(&[("search", pattern)]);
             }
 
+            if let Some(key) = &self.api_key {
+                req = req.header("PRIVATE-TOKEN", key);
+            }
+
             let resp = req.send().await?;
             if !resp.status().is_success() {
                 return Err(eyre!("GitLab API error {}: {}", resp.status(), resp.text().await?));
@@ -290,6 +310,10 @@ impl DistGitClient {
 
             if let Some(q) = search {
                 req = req.query(&[("q", q)]);
+            }
+
+            if let Some(key) = &self.api_key {
+                req = req.header("Authorization", format!("token {}", key));
             }
 
             let resp = req.send().await?;
@@ -475,6 +499,7 @@ impl DistGitClient {
         packages: Vec<String>,
         dest_dir: PathBuf,
         concurrency: usize,
+        new_top_origin: Option<String>,
     ) -> tokio::sync::mpsc::Receiver<(usize, usize, Result<GitRepoStatus>)> {
         let total = packages.len();
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency * 2);
@@ -491,9 +516,17 @@ impl DistGitClient {
                 let dest = dest_dir.clone();
                 let tx_clone = tx.clone();
                 let counter = completed_counter.clone();
+                let top_origin = new_top_origin.clone();
 
                 tokio::task::spawn_blocking(move || {
-                    let res = client.clone_or_pull(&pkg, &dest);
+                    let origin_url = top_origin.as_deref().map(|top| {
+                        if top.contains("{package}") {
+                            top.replace("{package}", &pkg)
+                        } else {
+                            format!("{}/{}", top.trim_end_matches('/'), pkg)
+                        }
+                    });
+                    let res = client.clone_or_pull_as(&pkg, &pkg, &dest, false, origin_url.as_deref());
                     drop(permit);
                     let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     let _ = tx_clone.blocking_send((idx, total, res));
@@ -510,8 +543,9 @@ impl DistGitClient {
         packages: Vec<String>,
         dest_dir: PathBuf,
         concurrency: usize,
+        new_top_origin: Option<String>,
     ) -> Vec<Result<GitRepoStatus>> {
-        let mut rx = self.sync_batch_stream(packages, dest_dir, concurrency).await;
+        let mut rx = self.sync_batch_stream(packages, dest_dir, concurrency, new_top_origin).await;
         let mut results = Vec::new();
         while let Some((_, _, res)) = rx.recv().await {
             results.push(res);
@@ -672,5 +706,33 @@ impl DistGitClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_top_origin_url_resolution() {
+        let top_origin = "https://codeberg.org/imcsk8/tacos";
+        let pkg = "strace";
+        let resolved = format!("{}/{}", top_origin.trim_end_matches('/'), pkg);
+        assert_eq!(resolved, "https://codeberg.org/imcsk8/tacos/strace");
+
+        let top_origin_slash = "https://codeberg.org/imcsk8/tacos/";
+        let resolved_slash = format!("{}/{}", top_origin_slash.trim_end_matches('/'), pkg);
+        assert_eq!(resolved_slash, "https://codeberg.org/imcsk8/tacos/strace");
+
+        let template = "https://codeberg.org/imcsk8/tacos/{package}.git";
+        let resolved_template = template.replace("{package}", pkg);
+        assert_eq!(resolved_template, "https://codeberg.org/imcsk8/tacos/strace.git");
+    }
+
+    #[test]
+    fn test_client_builder_with_api_key() {
+        let config = DistroConfig::fedora_rawhide();
+        let client = DistGitClient::new(config).with_api_key(Some("my_test_key".to_string()));
+        assert_eq!(client.api_key.as_deref(), Some("my_test_key"));
     }
 }
