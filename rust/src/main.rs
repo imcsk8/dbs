@@ -359,12 +359,42 @@ async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()> {
 }
 
 /// Dispatches the `build` subcommand.
-async fn handle_build(args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     let output_dir = args.output_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
     let concurrency = args.concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
     let mock_root = args.mock_root.or_else(|| Some(dbs_cfg.chroot.profile.clone()));
     let lookaside_dir = args.lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
     let record_db = args.record_db || dbs_cfg.database.record_db;
+    let distgit_dest = &dbs_cfg.distgit.dest;
+
+    // If --packages was provided, load targets from the file
+    if let Some(pkg_file) = &args.packages {
+        println!("Loading package build targets from file: {}", pkg_file.display());
+        let file_targets = runner::load_packages_from_file(pkg_file, distgit_dest)?;
+        println!("✓ Loaded {} package(s) from {}", file_targets.len(), pkg_file.display());
+
+        let mut combined = file_targets;
+        for t in args.targets {
+            let resolved = runner::resolve_package_target(&t.to_string_lossy(), distgit_dest)
+                .unwrap_or(t);
+            if !combined.contains(&resolved) {
+                combined.push(resolved);
+            }
+        }
+        args.targets = combined;
+    } else {
+        let mut resolved_targets = Vec::with_capacity(args.targets.len());
+        for t in args.targets {
+            let resolved = runner::resolve_package_target(&t.to_string_lossy(), distgit_dest)
+                .unwrap_or(t);
+            resolved_targets.push(resolved);
+        }
+        args.targets = resolved_targets;
+    }
+
+    if args.targets.is_empty() {
+        return Err(eyre!("No package targets specified to build. Provide target paths or a valid --packages file."));
+    }
 
     println!("===========================================================");
     println!(" DBS Package Build Orchestrator");

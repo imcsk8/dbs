@@ -4,6 +4,7 @@
 //! coupled with Rust's high-efficiency asynchronous concurrency system (`tokio::sync::Semaphore`)
 //! for worker orchestration, dynamic local repository feedback, and sequential chain builds.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -772,6 +773,150 @@ fn run_spectool_download(spec_path: &Path, sources_dir: &Path) -> bool {
     }
 }
 
+/// Discovers a `.spec` file within a directory.
+pub fn find_spec_in_dir(dir: &Path) -> Option<PathBuf> {
+    if let Some(dir_name) = dir.file_name().and_then(|n| n.to_str()) {
+        let expected = dir.join(format!("{}.spec", dir_name));
+        if expected.is_file() {
+            return Some(expected);
+        }
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() && p.extension().and_then(|ext| ext.to_str()) == Some("spec") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Resolves a package entry (which can be an explicit .spec / .src.rpm path, a directory,
+/// or a package name) to a valid spec or SRPM file path on disk.
+pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBuf> {
+    let p = Path::new(entry);
+
+    // 1. Direct file path check (e.g. "/path/to/pkg.spec" or "specs/pkg.spec" or "pkg.src.rpm")
+    if p.is_file() {
+        return Ok(p.to_path_buf());
+    }
+
+    // 2. Direct directory check (e.g. "/path/to/pkg/" or "specs/pkg/")
+    if p.is_dir() {
+        if let Some(spec) = find_spec_in_dir(p) {
+            return Ok(spec);
+        }
+        return Err(eyre!("Directory '{}' does not contain any .spec file", p.display()));
+    }
+
+    // 3. Check inside dist-git destination root (e.g. distgit_dest/pkg/pkg.spec or distgit_dest/pkg/*.spec)
+    let in_distgit_dir = distgit_dest.join(entry);
+    if in_distgit_dir.is_dir() {
+        if let Some(spec) = find_spec_in_dir(&in_distgit_dir) {
+            return Ok(spec);
+        }
+    }
+
+    // Check distgit_dest/pkg.spec directly
+    let in_distgit_spec = distgit_dest.join(format!("{}.spec", entry));
+    if in_distgit_spec.is_file() {
+        return Ok(in_distgit_spec);
+    }
+
+    // 4. Check common relative directories (e.g. specs/pkg/pkg.spec, specs/pkg.spec, data/distgit/pkg/...)
+    let specs_dir = Path::new("specs").join(entry);
+    if specs_dir.is_dir() {
+        if let Some(spec) = find_spec_in_dir(&specs_dir) {
+            return Ok(spec);
+        }
+    }
+    let specs_file = Path::new("specs").join(format!("{}.spec", entry));
+    if specs_file.is_file() {
+        return Ok(specs_file);
+    }
+
+    let default_distgit = Path::new("data/distgit").join(entry);
+    if default_distgit.is_dir() {
+        if let Some(spec) = find_spec_in_dir(&default_distgit) {
+            return Ok(spec);
+        }
+    }
+
+
+    // 5. Check if entry + .spec exists relative to current dir
+    let local_spec = PathBuf::from(format!("{}.spec", entry));
+    if local_spec.is_file() {
+        return Ok(local_spec);
+    }
+
+    Err(eyre!(
+        "Package or spec file '{}' not found (checked '{}' and '{}')",
+        entry,
+        p.display(),
+        in_distgit_dir.display()
+    ))
+}
+
+/// Loads package targets from a text file (one package per line).
+///
+/// Blank lines and comments starting with `#` are ignored.
+/// Resolves package names, directories, or direct spec/srpm paths.
+pub fn load_packages_from_file(file_path: &Path, distgit_dest: &Path) -> Result<Vec<PathBuf>> {
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| eyre!("Failed to read packages file {}: {}", file_path.display(), e))?;
+    parse_packages_list(&content, distgit_dest, file_path)
+}
+
+/// Parses a newline-delimited packages list from a string.
+pub fn parse_packages_list(content: &str, distgit_dest: &Path, file_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (line_no, raw_line) in content.lines().enumerate() {
+        let trimmed = raw_line.trim();
+        // Remove trailing comments if present
+        let clean = match trimmed.split_once('#') {
+            Some((before, _)) => before.trim(),
+            None => trimmed,
+        };
+
+        if clean.is_empty() {
+            continue;
+        }
+
+        // Skip comps groups or environment definitions (e.g. @workstation-product-environment)
+        if clean.starts_with('@') {
+            continue;
+        }
+
+        match resolve_package_target(clean, distgit_dest) {
+            Ok(resolved) => {
+                if seen.insert(resolved.clone()) {
+                    targets.push(resolved);
+                }
+            }
+            Err(e) => {
+                return Err(eyre!(
+                    "Line {} in packages file {}: {}",
+                    line_no + 1,
+                    file_path.display(),
+                    e
+                ));
+            }
+        }
+    }
+
+    if targets.is_empty() {
+        return Err(eyre!(
+            "No valid package targets found in {}",
+            file_path.display()
+        ));
+    }
+
+    Ok(targets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -851,5 +996,100 @@ ERROR: Command failed: # /usr/bin/systemd-nspawn -D /root dnf install
             summary,
             "ERROR: Command failed: # /usr/bin/systemd-nspawn -D /root dnf install"
         );
+    }
+
+    #[test]
+    fn test_find_spec_in_dir() {
+        let dir = tempdir().unwrap();
+        let sub = dir.path().join("strace");
+        fs::create_dir(&sub).unwrap();
+        assert!(find_spec_in_dir(&sub).is_none());
+
+        let spec_file = sub.join("strace.spec");
+        File::create(&spec_file).unwrap();
+        assert_eq!(find_spec_in_dir(&sub), Some(spec_file));
+    }
+
+    #[test]
+    fn test_resolve_package_target() {
+        let dir = tempdir().unwrap();
+        let distgit = dir.path().join("distgit");
+        let pkg_dir = distgit.join("bash");
+        fs::create_dir_all(&pkg_dir).unwrap();
+        let bash_spec = pkg_dir.join("bash.spec");
+        File::create(&bash_spec).unwrap();
+
+        // 1. Direct path
+        assert_eq!(resolve_package_target(bash_spec.to_str().unwrap(), &distgit).unwrap(), bash_spec);
+
+        // 2. Direct directory
+        assert_eq!(resolve_package_target(pkg_dir.to_str().unwrap(), &distgit).unwrap(), bash_spec);
+
+        // 3. Package name in distgit dest
+        assert_eq!(resolve_package_target("bash", &distgit).unwrap(), bash_spec);
+
+        // 4. Missing package
+        assert!(resolve_package_target("nonexistent", &distgit).is_err());
+    }
+
+    #[test]
+    fn test_parse_packages_list_valid() {
+        let dir = tempdir().unwrap();
+        let distgit = dir.path().join("distgit");
+
+        let p1 = distgit.join("pkg1");
+        fs::create_dir_all(&p1).unwrap();
+        let spec1 = p1.join("pkg1.spec");
+        File::create(&spec1).unwrap();
+
+        let p2 = distgit.join("pkg2");
+        fs::create_dir_all(&p2).unwrap();
+        let spec2 = p2.join("pkg2.spec");
+        File::create(&spec2).unwrap();
+
+        let manifest = "
+# Core build manifest
+pkg1
+  # Inline comment
+pkg2   # trailing comment
+pkg1   # duplicate entry should be deduplicated
+";
+        let fake_file = Path::new("packages.txt");
+        let targets = parse_packages_list(manifest, &distgit, fake_file).unwrap();
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0], spec1);
+        assert_eq!(targets[1], spec2);
+    }
+
+    #[test]
+    fn test_parse_packages_list_missing() {
+        let dir = tempdir().unwrap();
+        let distgit = dir.path().join("distgit");
+        let manifest = "
+# Manifest with missing package
+valid_pkg
+missing_pkg
+";
+        let valid_dir = distgit.join("valid_pkg");
+        fs::create_dir_all(&valid_dir).unwrap();
+        File::create(valid_dir.join("valid_pkg.spec")).unwrap();
+
+        let fake_file = Path::new("packages.txt");
+        let res = parse_packages_list(manifest, &distgit, fake_file);
+        assert!(res.is_err());
+        let err_str = res.unwrap_err().to_string();
+        assert!(err_str.contains("Line 4"));
+        assert!(err_str.contains("missing_pkg"));
+    }
+
+    #[test]
+    fn test_parse_packages_list_empty() {
+        let dir = tempdir().unwrap();
+        let distgit = dir.path().join("distgit");
+        let manifest = "# Only comments\n\n   # Empty lines\n";
+        let fake_file = Path::new("packages.txt");
+        let res = parse_packages_list(manifest, &distgit, fake_file);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("No valid package targets found"));
     }
 }

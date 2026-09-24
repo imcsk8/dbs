@@ -254,8 +254,12 @@ pub struct BuildArgs {
     #[arg(short = 'c', long)]
     pub continue_on_error: bool,
 
+    /// Path to a file containing package names or spec paths to build (one per line).
+    #[arg(short = 'p', long)]
+    pub packages: Option<PathBuf>,
+
     /// Spec file or SRPM file paths to build.
-    #[arg(required = true)]
+    #[arg(required_unless_present = "packages")]
     pub targets: Vec<PathBuf>,
 
     /// Record build metrics, status, and output artifacts into PostgreSQL database.

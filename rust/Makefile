@@ -19,4 +19,4 @@ clean:
 release: dirs
 	cargo build --release
 	mkdir -p bin
-	cp target/release/dbs bin/dbs
+	install -m 755 target/release/dbs bin/dbs

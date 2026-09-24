@@ -60,5 +60,5 @@ clean:
 
 release: release_dirs
 	make -C rust release
-	cp rust/bin/dbs bin/dbs
+	install -m 755 rust/bin/dbs bin/dbs
 

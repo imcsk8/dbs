@@ -400,6 +400,38 @@ You can specify a chroot using either:
      -o staging data/distgit/lz4/lz4.spec
    ```
 
+### Batch Builds from a Package List File (`--packages` / `-p`)
+
+Instead of specifying each `.spec` path as a command-line argument, you can load a list of packages to build from a file containing one package per line:
+
+```bash
+# Build packages listed in packages.txt with 4 parallel Mock workers
+./bin/dbs build --packages packages.txt -j 4
+
+# Or using tacos.toml configuration
+./bin/dbs --config tacos.toml build --packages packages.txt
+```
+
+**Manifest Features:**
+* **Package Names:** Bare package names (e.g. `strace`, `bash`, `zstd`) are automatically resolved inside your configured dist-git directory (e.g. `/srv/dbs/tacos/rpm/<pkg>/<pkg>.spec`).
+* **Direct Spec / SRPM Paths:** Full or relative paths (e.g. `specs/custom.spec`, `/path/to/app.src.rpm`).
+* **Comments & Whitespace:** Empty lines and lines/comments beginning with `#` are ignored.
+* **Deduplication:** Repeated packages in the manifest or on the command line are automatically deduplicated while preserving build order.
+
+Example `packages.txt`:
+```text
+# Core operating system utilities
+bash
+coreutils
+grep
+strace
+
+# Compression libraries
+zstd
+lz4
+```
+
+
 ### Importing or Scaffolding New Chroots
 
 To import an external chroot configuration and its `templates/` folder into your DBS workspace:
