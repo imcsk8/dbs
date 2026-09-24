@@ -802,15 +802,7 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
         return Ok(p.to_path_buf());
     }
 
-    // 2. Direct directory check (e.g. "/path/to/pkg/" or "specs/pkg/")
-    if p.is_dir() {
-        if let Some(spec) = find_spec_in_dir(p) {
-            return Ok(spec);
-        }
-        return Err(eyre!("Directory '{}' does not contain any .spec file", p.display()));
-    }
-
-    // 3. Check inside dist-git destination root (e.g. distgit_dest/pkg/pkg.spec or distgit_dest/pkg/*.spec)
+    // 2. Check inside dist-git destination root (e.g. distgit_dest/pkg/pkg.spec or distgit_dest/pkg/*.spec)
     let in_distgit_dir = distgit_dest.join(entry);
     if in_distgit_dir.is_dir() {
         if let Some(spec) = find_spec_in_dir(&in_distgit_dir) {
@@ -824,7 +816,7 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
         return Ok(in_distgit_spec);
     }
 
-    // 4. Check common relative directories (e.g. specs/pkg/pkg.spec, specs/pkg.spec, data/distgit/pkg/...)
+    // 3. Check common relative directories (e.g. specs/pkg/pkg.spec, specs/pkg.spec, data/distgit/pkg/...)
     let specs_dir = Path::new("specs").join(entry);
     if specs_dir.is_dir() {
         if let Some(spec) = find_spec_in_dir(&specs_dir) {
@@ -843,12 +835,21 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
         }
     }
 
-
-    // 5. Check if entry + .spec exists relative to current dir
+    // 4. Check if entry + .spec exists relative to current dir
     let local_spec = PathBuf::from(format!("{}.spec", entry));
     if local_spec.is_file() {
         return Ok(local_spec);
     }
+
+    // 5. Direct directory check (e.g. "/path/to/pkg/" or "specs/pkg/")
+    if p.is_dir() {
+        if let Some(spec) = find_spec_in_dir(p) {
+            return Ok(spec);
+        }
+        return Err(eyre!("Directory '{}' does not contain any .spec file", p.display()));
+    }
+
+
 
     Err(eyre!(
         "Package or spec file '{}' not found (checked '{}' and '{}')",
