@@ -655,6 +655,31 @@ pub fn find_srpm_in_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Extracts the clean download URL (without RPM `#/filename` URL fragments)
+/// and the destination filename for a source or patch entry.
+pub fn parse_source_entry(raw_src: &str) -> (String, String) {
+    let trimmed = raw_src.trim();
+    let (url_part, raw_filename) = if let Some((url, frag)) = trimmed.split_once('#') {
+        let frag_name = frag.trim_start_matches('/').trim();
+        let fname = if !frag_name.is_empty() {
+            frag_name.to_string()
+        } else {
+            url.trim().split('/').last().unwrap_or(url).to_string()
+        };
+        (url.trim(), fname)
+    } else {
+        (trimmed, trimmed.split('/').last().unwrap_or(trimmed).to_string())
+    };
+
+    // If filename has a query string (e.g. ?foo=bar), take only the part before ?
+    let filename = match raw_filename.split_once('?') {
+        Some((before, _)) if !before.is_empty() => before.to_string(),
+        _ => raw_filename,
+    };
+
+    (url_part.to_string(), filename)
+}
+
 /// Ensures all source files and patches required by a spec file are present locally.
 pub fn ensure_sources_present(
     spec_path: &Path,
@@ -662,6 +687,7 @@ pub fn ensure_sources_present(
     pkg_name: &str,
     lookaside_dir: Option<&Path>,
 ) {
+    let _ = fs::create_dir_all(sources_dir);
     let spec_dir = spec_path.parent().unwrap_or_else(|| Path::new("."));
     let lookaside_mgr = crate::lookaside::LookasideManager::resolve_default(lookaside_dir);
 
@@ -706,10 +732,21 @@ pub fn ensure_sources_present(
         Err(_) => return,
     };
 
-    let mut has_missing = false;
+    // Collect all sources and remote patches
+    let mut all_items: Vec<&String> = Vec::new();
     for src in &meta.sources {
-        let filename = Path::new(src).file_name().and_then(|s| s.to_str()).unwrap_or(src);
-        if !sources_dir.join(filename).exists() {
+        all_items.push(src);
+    }
+    for patch in &meta.patches {
+        if patch.starts_with("http://") || patch.starts_with("https://") {
+            all_items.push(patch);
+        }
+    }
+
+    let mut has_missing = false;
+    for item in &all_items {
+        let (_, filename) = parse_source_entry(item);
+        if !sources_dir.join(&filename).exists() {
             has_missing = true;
             break;
         }
@@ -717,42 +754,36 @@ pub fn ensure_sources_present(
 
     if has_missing {
         println!("  Attempting spectool download for missing sources of {}...", pkg_name);
-        let ok = run_spectool_download(spec_path, sources_dir);
-        if ok {
-            for src in &meta.sources {
-                let filename = Path::new(src).file_name().and_then(|s| s.to_str()).unwrap_or(src);
-                let dest = sources_dir.join(filename);
-                if dest.exists() {
-                    let _ = lookaside_mgr.upload(&dest, pkg_name, Some(spec_path), false);
+        let _ = run_spectool_download(spec_path, sources_dir);
+
+        // Fallback to direct curl download for any remaining missing remote sources or patches
+        for item in &all_items {
+            let (download_url, filename) = parse_source_entry(item);
+            let dest = sources_dir.join(&filename);
+
+            if !dest.exists() && (download_url.starts_with("http://") || download_url.starts_with("https://")) {
+                if let Some(parent) = dest.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                println!("  Downloading source URL {} -> {}...", download_url, dest.display());
+                let dl_status = Command::new("curl")
+                    .arg("-f")
+                    .arg("-L")
+                    .arg("-s")
+                    .arg("-S")
+                    .arg("--connect-timeout")
+                    .arg("15")
+                    .arg("-o")
+                    .arg(&dest)
+                    .arg(&download_url)
+                    .status();
+                if let Err(e) = dl_status {
+                    eprintln!("  Failed to execute curl for {}: {}", download_url, e);
                 }
             }
-        } else {
-            // Direct curl download for URL sources
-            for src in &meta.sources {
-                if src.starts_with("http://") || src.starts_with("https://") {
-                    if let Some(fname) = src.split('/').last() {
-                        let dest = sources_dir.join(fname);
-                        if !dest.exists() {
-                            println!("  Downloading source URL {} -> {}...", src, dest.display());
-                            let dl_status = Command::new("curl")
-                                .arg("-f")
-                                .arg("-L")
-                                .arg("-s")
-                                .arg("-S")
-                                .arg("--connect-timeout")
-                                .arg("15")
-                                .arg("-o")
-                                .arg(&dest)
-                                .arg(src)
-                                .status();
-                            if let Ok(st) = dl_status {
-                                if st.success() && dest.exists() {
-                                    let _ = lookaside_mgr.upload(&dest, pkg_name, Some(spec_path), false);
-                                }
-                            }
-                        }
-                    }
-                }
+
+            if dest.exists() {
+                let _ = lookaside_mgr.upload(&dest, pkg_name, Some(spec_path), false);
             }
         }
     }
@@ -760,7 +791,11 @@ pub fn ensure_sources_present(
 
 /// Runs `spectool -g -C <sources_dir> <spec_path>` to fetch remote source and patch URLs.
 fn run_spectool_download(spec_path: &Path, sources_dir: &Path) -> bool {
+    let _ = fs::create_dir_all(sources_dir);
+    let abs_sources = fs::canonicalize(sources_dir).unwrap_or_else(|_| sources_dir.to_path_buf());
     let status = Command::new("spectool")
+        .arg("--define")
+        .arg(format!("_sourcedir {}", abs_sources.display()))
         .arg("-g")
         .arg("-C")
         .arg(sources_dir)
@@ -1092,5 +1127,28 @@ missing_pkg
         let res = parse_packages_list(manifest, &distgit, fake_file);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("No valid package targets found"));
+    }
+
+    #[test]
+    fn test_parse_source_entry() {
+        let (url, fname) = parse_source_entry("https://www.ivarch.com/programs/sources/pv-1.11.0.tar.gz.txt");
+        assert_eq!(url, "https://www.ivarch.com/programs/sources/pv-1.11.0.tar.gz.txt");
+        assert_eq!(fname, "pv-1.11.0.tar.gz.txt");
+
+        let (url, fname) = parse_source_entry("https://github.com/facebook/zstd/archive/v1.5.6.tar.gz#/zstd-1.5.6.tar.gz");
+        assert_eq!(url, "https://github.com/facebook/zstd/archive/v1.5.6.tar.gz");
+        assert_eq!(fname, "zstd-1.5.6.tar.gz");
+
+        let (url, fname) = parse_source_entry("https://example.com/download.php?id=123#/my-pkg-1.0.tar.gz");
+        assert_eq!(url, "https://example.com/download.php?id=123");
+        assert_eq!(fname, "my-pkg-1.0.tar.gz");
+
+        let (url, fname) = parse_source_entry("https://example.com/download/archive.tar.gz?version=1.0");
+        assert_eq!(url, "https://example.com/download/archive.tar.gz?version=1.0");
+        assert_eq!(fname, "archive.tar.gz");
+
+        let (url, fname) = parse_source_entry("local-patch.patch");
+        assert_eq!(url, "local-patch.patch");
+        assert_eq!(fname, "local-patch.patch");
     }
 }
