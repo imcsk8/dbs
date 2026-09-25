@@ -1,13 +1,13 @@
 config_opts['root'] = 'tacos-stable-x86_64-{{ target_arch }}'
 config_opts['chroot_setup_cmd'] = 'install @buildsys-build'
-config_opts['dist'] = '.custom'
+config_opts['dist'] = '.tcrs'
 config_opts['releasever'] = 'rawhide'
 config_opts['package_manager'] = 'dnf5'
 config_opts['bootstrap_image'] = 'registry.fedoraproject.org/fedora:rawhide'
 config_opts['bootstrap_image_ready'] = True
 config_opts['description'] = 'Custom Distribution Chroot for tacos-stable-x86_64'
 
-config_opts['macros']['%dist'] = '.custom'
+config_opts['macros']['%dist'] = '.tcrs'
 config_opts['macros']['%vendor'] = 'tacos-stable-x86_64'
 config_opts['macros']['%_smp_mflags'] = '-j2'
 config_opts['macros']['%_smp_build_ncpus'] = '2'
