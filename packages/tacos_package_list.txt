@@ -14,58 +14,38 @@ htop
 zstd
 mbuffer
 pv
-fedora-repos-rawhide
-glibc-langpack-en
-glibc-langpack-es
-grub2-efi-x64
-grub2-efi-x64-modules
-grub2-pc
-grub2-pc-modules
-grub2-efi-x64-cdboot
+fedora-repos
+glibc
+grub2
 kernel
-kernel-modules
-kernel-modules-core
-kernel-modules-extra
 kexec-tools
 plymouth
-plymouth-graphics-libs
-plymouth-plugin-label
-plymouth-plugin-script
-plymouth-plugin-two-step
-plymouth-scripts
-plymouth-theme-script
-shim-x64
+shim
 mokutil
 efibootmgr
-tacos-os-repo
+#tacos-os-repo
 NetworkManager
-NetworkManager-wifi
 neovim
 tmux
 fontconfig
 dconf
 toolbox
-qemu-system-x86
+qemu
 strace
-cracklib-dicts
+cracklib
 libpwquality
 openssl
-tacosctl
+#tacosctl
 
 # ------------------------------------------------------------------------------
 # Desktop Profile (GNOME Workstation)
 # ------------------------------------------------------------------------------
 # Comps environment group: @workstation-product-environment
-dbus-daemon
-systemd-pam
-gnome-shell-extension-user-theme
-gnome-shell-extension-apps-menu
-gnome-shell-extension-auto-move-windows
-gnome-shell-extension-launch-new-instance
-gnome-shell-extension-places-menu
-gnome-shell-extension-drive-menu
+dbus
+systemd
+gnome-shell-extensions
 gnome-tweaks
-glib2-devel
+glib2
 flatpak
 gnome-extensions-app
 zenity
@@ -76,25 +56,23 @@ lm_sensors
 # ------------------------------------------------------------------------------
 # Comps environment group: @server-product-environment
 cockpit
-vim-enhanced
+vim
 
 # ------------------------------------------------------------------------------
 # Live ISO Form Factor Profile
 # ------------------------------------------------------------------------------
-dracut-live
-dracut-network
+dracut
+dracut
 
 # ------------------------------------------------------------------------------
 # OEM Disk Form Factor Profile
 # ------------------------------------------------------------------------------
 xfsprogs
 dosfstools
-dracut-kiwi-oem-dump
-dracut-kiwi-oem-repart
+kiwi
 
 # ------------------------------------------------------------------------------
 # Bootstrap Packages
 # ------------------------------------------------------------------------------
-basesystem
 dnf5
 filesystem
