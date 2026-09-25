@@ -385,8 +385,39 @@ async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     } else {
         let mut resolved_targets = Vec::with_capacity(args.targets.len());
         for t in args.targets {
-            let resolved = runner::resolve_package_target(&t.to_string_lossy(), distgit_dest)
-                .unwrap_or(t);
+            let target_str = t.to_string_lossy();
+            let resolved = match runner::resolve_package_target(&target_str, distgit_dest) {
+                Ok(path) => path,
+                Err(_) => {
+                    if !target_str.ends_with(".spec") && !target_str.ends_with(".src.rpm") && !target_str.ends_with(".rpm") {
+                        if let Some(config) = DistroConfig::from_preset(&dbs_cfg.distgit.distro) {
+                            println!("Target '{}' not found locally in {}. Auto-cloning from {}...", target_str, distgit_dest.display(), dbs_cfg.distgit.distro);
+                            let client = DistGitClient::new(config).with_api_key(dbs_cfg.distgit.api_key.clone());
+                            let resolved_origin = dbs_cfg.distgit.new_top_origin.as_ref().map(|top| {
+                                if top.contains("{package}") {
+                                    top.replace("{package}", &target_str)
+                                } else {
+                                    format!("{}/{}", top.trim_end_matches('/'), target_str)
+                                }
+                            });
+                            match client.clone_or_pull_as(&target_str, &target_str, distgit_dest, false, resolved_origin.as_deref()) {
+                                Ok(status) => {
+                                    println!("✓ Cloned {} -> {} (branch: {}, commit: {:.8})", target_str, status.package_name, status.branch, status.commit_hash);
+                                    status.spec_path
+                                }
+                                Err(e) => {
+                                    eprintln!("Warning: Failed to auto-clone '{}' from distgit: {}", target_str, e);
+                                    t
+                                }
+                            }
+                        } else {
+                            t
+                        }
+                    } else {
+                        t
+                    }
+                }
+            };
             resolved_targets.push(resolved);
         }
         args.targets = resolved_targets;
