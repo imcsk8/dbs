@@ -3,6 +3,7 @@
 //! Standardizes on **Mock** as the isolated, hermetic chroot build engine,
 //! coupled with Rust's high-efficiency asynchronous concurrency system (`tokio::sync::Semaphore`)
 //! for worker orchestration, dynamic local repository feedback, and sequential chain builds.
+pub mod gate;
 
 use std::collections::HashSet;
 use std::fs;
@@ -55,6 +56,8 @@ pub struct MockRunner {
     pub local_repo_dir: Option<PathBuf>,
     /// Path to local lookaside cache for instant BTRFS CoW source staging.
     pub lookaside_dir: Option<PathBuf>,
+    /// Optional database connection URL to record build lifecycle states.
+    pub db_url: Option<String>,
 }
 
 impl MockRunner {
@@ -66,6 +69,7 @@ impl MockRunner {
             unique_ext: None,
             local_repo_dir: None,
             lookaside_dir: None,
+            db_url: None,
         }
     }
 
@@ -103,6 +107,12 @@ impl MockRunner {
         self
     }
 
+    /// Sets database URL for recording build lifecycle events.
+    pub fn with_db_url(mut self, db_url: impl Into<String>) -> Self {
+        self.db_url = Some(db_url.into());
+        self
+    }
+
     /// Builds a single package with worker isolation, automatic source acquisition, and two-stage Mock compilation.
     pub fn build_with_worker(
         &self,
@@ -119,6 +129,13 @@ impl MockRunner {
 
         let log_path = pkg_result_dir.join("build.log");
         let start_time = Instant::now();
+
+        // Record build started state in database
+        if let Some(db_url) = &self.db_url {
+            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                let _ = crate::db::record_build_start(&mut conn, pkg_stem, Some(worker_id as i32), Some(&log_path.display().to_string()));
+            }
+        }
 
         let is_srpm = input_path.to_string_lossy().ends_with(".src.rpm");
 
@@ -165,27 +182,39 @@ impl MockRunner {
                     &String::from_utf8_lossy(&srpm_output.stderr),
                 );
 
-                return Ok(BuildOutput {
+                let out = BuildOutput {
                     target_name: pkg_stem.to_string(),
                     success: false,
                     duration_seconds,
                     log_path,
                     artifacts: Vec::new(),
                     error_summary: Some(error_summary),
-                });
+                };
+                if let Some(db_url) = &self.db_url {
+                    if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                        let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
+                    }
+                }
+                return Ok(out);
             }
 
             match find_srpm_in_dir(&pkg_result_dir) {
                 Some(f) => f,
                 None => {
-                    return Ok(BuildOutput {
+                    let out = BuildOutput {
                         target_name: pkg_stem.to_string(),
                         success: false,
                         duration_seconds: start_time.elapsed().as_secs_f64(),
                         log_path,
                         artifacts: Vec::new(),
                         error_summary: Some("Mock --buildsrpm succeeded but no .src.rpm was created".to_string()),
-                    });
+                    };
+                    if let Some(db_url) = &self.db_url {
+                        if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                            let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
+                        }
+                    }
+                    return Ok(out);
                 }
             }
         };
@@ -236,14 +265,22 @@ impl MockRunner {
             None
         };
 
-        Ok(BuildOutput {
+        let out = BuildOutput {
             target_name: pkg_stem.to_string(),
             success,
             duration_seconds,
             log_path,
             artifacts,
             error_summary,
-        })
+        };
+
+        if let Some(db_url) = &self.db_url {
+            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
+            }
+        }
+
+        Ok(out)
     }
 
     /// Executes sequential chain build for multiple interdependent packages (`mock --chain`).
@@ -256,6 +293,15 @@ impl MockRunner {
         fs::create_dir_all(result_dir)?;
         let log_path = result_dir.join("chain.log");
         let start_time = Instant::now();
+
+        if let Some(db_url) = &self.db_url {
+            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                for target in targets {
+                    let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
+                    let _ = crate::db::record_build_start(&mut conn, pkg_stem, Some(1), Some(&log_path.display().to_string()));
+                }
+            }
+        }
 
         // Convert any .spec targets to .src.rpm first
         let mut srpms = Vec::new();
@@ -341,14 +387,25 @@ impl MockRunner {
             None
         };
 
-        Ok(BuildOutput {
+        let out = BuildOutput {
             target_name: format!("chain-{}pkgs", srpms.len()),
             success,
             duration_seconds,
             log_path,
             artifacts,
             error_summary,
-        })
+        };
+
+        if let Some(db_url) = &self.db_url {
+            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                for target in targets {
+                    let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
+                    let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     /// Builds multiple packages in parallel using Tokio worker concurrency and dynamic repository feedback.

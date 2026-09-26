@@ -22,6 +22,9 @@ pub struct DbsConfig {
 
     #[serde(default)]
     pub distro: DistroSettings,
+
+    #[serde(default)]
+    pub build: BuildConfig,
 }
 
 impl Default for DbsConfig {
@@ -31,6 +34,27 @@ impl Default for DbsConfig {
             chroot: ChrootConfig::default(),
             distgit: DistgitConfig::default(),
             distro: DistroSettings::default(),
+            build: BuildConfig::default(),
+        }
+    }
+}
+
+/// Settings for package compilation and smart build gating.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildConfig {
+    /// Skip compiling packages if the package version/release is already built.
+    #[serde(default = "default_skip_existing")]
+    pub skip_existing: bool,
+}
+
+fn default_skip_existing() -> bool {
+    true
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            skip_existing: default_skip_existing(),
         }
     }
 }

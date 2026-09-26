@@ -437,6 +437,11 @@ async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     if record_db {
         println!(" Record to DB: enabled");
     }
+    if args.force {
+        println!(" Force Build:  enabled (-f/--force specified)");
+    } else if args.skip_existing && dbs_cfg.build.skip_existing {
+        println!(" Skip Built:   enabled (only building new versions)");
+    }
     println!("===========================================================");
 
     let mut db_conn = if record_db {
@@ -453,6 +458,52 @@ async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     } else {
         None
     };
+
+    let should_check_existing = !args.force && (args.skip_existing && dbs_cfg.build.skip_existing);
+    if should_check_existing {
+        let mut targets_to_build = Vec::new();
+        let mut skipped_targets = Vec::new();
+
+        let dist_tag = ".tcrs";
+
+        for target in &args.targets {
+            match runner::gate::check_package_already_built(
+                target,
+                Some(&dbs_cfg.distro.dest),
+                Some(&output_dir),
+                db_conn.as_mut(),
+                Some(dist_tag),
+            ) {
+                Ok(Some(existing)) => {
+                    println!("✓ Package {}-{}-{} is already built and up-to-date ({}). Skipping.",
+                        existing.name, existing.version, existing.release, existing.source);
+                    if let Some(art) = &existing.artifact_path {
+                        println!("  Artifact: {}", art.display());
+                    }
+                    skipped_targets.push((target.clone(), existing));
+                }
+                Ok(None) => {
+                    targets_to_build.push(target.clone());
+                }
+                Err(_) => {
+                    targets_to_build.push(target.clone());
+                }
+            }
+        }
+
+        if targets_to_build.is_empty() {
+            println!("\nAll {} target package(s) are already built and up-to-date. Nothing to build.", args.targets.len());
+            println!("Use '--force' or '-f' to rebuild existing packages.");
+            return Ok(());
+        }
+
+        if !skipped_targets.is_empty() {
+            println!("\nBuilding {} remaining package(s) (skipped {} already built)...",
+                targets_to_build.len(), skipped_targets.len());
+        }
+
+        args.targets = targets_to_build;
+    }
 
     if args.fetch_sources {
         println!("Checking and synchronizing sources into lookaside cache for targets...");
@@ -471,6 +522,11 @@ async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             let mut runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
             if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
+            }
+            if record_db {
+                if let Some(url) = dbs_cfg.database.url.as_ref() {
+                    runner = runner.with_db_url(url.clone());
+                }
             }
             println!(" Chroot Profile: {}", runner.root_name);
             if let Some(cfg) = &runner.config_dir {
@@ -527,11 +583,15 @@ async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         "rpmbuild" => {
             let runner = RpmbuildRunner;
             for target in &args.targets {
+                let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
+                let log_path = output_dir.join("rpmbuild.log");
+                if let Some(conn) = &mut db_conn {
+                    let _ = db::record_build_start(conn, name, Some(1), Some(&log_path.display().to_string()));
+                }
                 println!("\nBuilding {} on host with rpmbuild...", target.display());
                 let out = runner.build(target, &output_dir)?;
                 print_build_output(&out);
                 if let Some(conn) = &mut db_conn {
-                    let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                     let _ = db::record_build_result(conn, name, &out);
                 }
             }
@@ -754,6 +814,11 @@ async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         let mut mock_runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
         if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
+        }
+        if record_db {
+            if let Some(url) = dbs_cfg.database.url.as_ref() {
+                mock_runner = mock_runner.with_db_url(url.clone());
+            }
         }
         println!(" Chroot Profile: {}", mock_runner.root_name);
         if let Some(cfg) = &mock_runner.config_dir {
@@ -1186,6 +1251,11 @@ async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }
+            if record_db {
+                if let Some(url) = dbs_cfg.database.url.as_ref() {
+                    mock_runner = mock_runner.with_db_url(url.clone());
+                }
+            }
             let runner_arc = Arc::new(mock_runner);
 
             let mut db_conn = if record_db {
@@ -1209,11 +1279,35 @@ async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> {
                     }
                 }
 
-                if !targets.is_empty() {
-                    let results = runner_arc
-                        .clone()
-                        .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
-                        .await;
+                let mut layer_targets = Vec::new();
+                for target in targets {
+                    if dbs_cfg.build.skip_existing {
+                        if let Ok(Some(existing)) = runner::gate::check_package_already_built(
+                            &target,
+                            Some(&dbs_cfg.distro.dest),
+                            Some(&staging_dir),
+                            db_conn.as_mut(),
+                            Some(".tcrs"),
+                        ) {
+                            println!("✓ Layer package {}-{}-{} is already built ({}). Skipping.",
+                                existing.name, existing.version, existing.release, existing.source);
+                            continue;
+                        }
+                    }
+                    layer_targets.push(target);
+                }
+
+                if layer_targets.is_empty() {
+                    println!("All packages in Layer {} are already built. Skipping layer.", layer.layer_index);
+                    continue;
+                }
+
+                let targets = layer_targets;
+
+                let results = runner_arc
+                    .clone()
+                    .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
+                    .await;
 
                     for (idx, res) in results.into_iter().enumerate() {
                         match res {
@@ -1229,7 +1323,6 @@ async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> {
                             Err(e) => eprintln!("✗ Worker build error: {}", e),
                         }
                     }
-                }
             }
 
             // 5. Automatically publish build artifacts to distribution repo

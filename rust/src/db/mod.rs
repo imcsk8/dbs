@@ -370,9 +370,22 @@ pub fn record_build_result(
         output.error_summary.as_deref(),
     )?;
 
+    let mut real_version: Option<String> = None;
+    let mut real_release: Option<String> = None;
+    let mut real_sourcerpm: Option<String> = None;
+
     for art in &output.artifacts {
         let filename = art.file_name().and_then(|f| f.to_str()).unwrap_or("unknown.rpm");
         let is_src = filename.ends_with(".src.rpm");
+        if is_src && real_sourcerpm.is_none() {
+            real_sourcerpm = Some(filename.to_string());
+        }
+        if let Ok(hdr) = librpm::package::PackageHeader::from_file(art, Some(&librpm::verify::VerifyOptions::skip_verification())) {
+            if real_version.is_none() && !hdr.is_source() {
+                real_version = Some(hdr.version().to_string());
+                real_release = Some(hdr.release().to_string());
+            }
+        }
         let size = fs::metadata(art).map(|m| m.len() as i64).unwrap_or(0);
         let new_art = NewPackageArtifact {
             id_package: Some(pkg_id),
@@ -385,6 +398,116 @@ pub fn record_build_result(
         let _ = insert_package_artifact(conn, &new_art);
     }
 
+    if let (Some(ver), Some(rel)) = (&real_version, &real_release) {
+        let _ = diesel::update(package::table.filter(package::id.eq(pkg_id)))
+            .set((
+                package::version.eq(ver),
+                package::release.eq(rel),
+                package::sourcerpm.eq(&real_sourcerpm),
+            ))
+            .execute(conn);
+    }
+
     Ok(())
+}
+
+/// Build count metrics aggregated across all tracked packages.
+#[derive(Debug, Clone, Default)]
+pub struct BuildCounts {
+    pub building: usize,
+    pub success: usize,
+    pub failed: usize,
+    pub pending: usize,
+    pub total: usize,
+}
+
+/// Updates or creates a package record to mark build execution as started (BUILDING).
+pub fn record_build_start(
+    conn: &mut PgConnection,
+    pkg_name: &str,
+    worker_id: Option<i32>,
+    log_path: Option<&str>,
+) -> Result<i32> {
+    if let Ok(Some(existing)) = find_package_by_name(conn, pkg_name) {
+        diesel::update(package::table.filter(package::id.eq(existing.id)))
+            .set((
+                package::build_status.eq(BuildStatus::BUILDING),
+                package::worker_id.eq(worker_id),
+                package::build_log_path.eq(log_path),
+                package::error_summary.eq(None::<String>),
+            ))
+            .execute(conn)?;
+        Ok(existing.id)
+    } else {
+        let new_pkg = NewPackage {
+            name: pkg_name.to_string(),
+            epoch: 0,
+            version: "0.0.0".to_string(),
+            release: "1".to_string(),
+            architecture: 1,
+            package_size: "0 MB".to_string(),
+            file_size_bytes: 0,
+            source: format!("{}.src.rpm", pkg_name),
+            repository: "build".to_string(),
+            summary: format!("Building package {}", pkg_name),
+            url: "https://localhost".to_string(),
+            license: "Unknown".to_string(),
+            description: format!("Building package {}", pkg_name),
+            in_repo: Some(false),
+            created: Some(false),
+            vulnerable: Some(false),
+            build_status: BuildStatus::BUILDING,
+            build_duration_seconds: None,
+            build_log_path: log_path.map(|s| s.to_string()),
+            error_summary: None,
+            worker_id,
+            sourcerpm: None,
+            dist_git_url: None,
+            dist_git_branch: None,
+            dist_git_commit: None,
+            spec_file: None,
+        };
+        let rec = insert_package(conn, &new_pkg)?;
+        Ok(rec.id)
+    }
+}
+
+/// Retrieves all active packages currently in BUILDING state.
+pub fn list_active_builds(conn: &mut PgConnection) -> Result<Vec<Package>> {
+    package::table
+        .filter(package::build_status.eq(BuildStatus::BUILDING))
+        .order(package::id.desc())
+        .load::<Package>(conn)
+        .map_err(|e| eyre!("Failed to list active builds: {}", e))
+}
+
+/// Retrieves recent packages that have been built or are building.
+pub fn list_recent_builds(conn: &mut PgConnection, limit: i64) -> Result<Vec<Package>> {
+    package::table
+        .filter(package::build_status.ne(BuildStatus::PENDING))
+        .order(package::id.desc())
+        .limit(limit)
+        .load::<Package>(conn)
+        .map_err(|e| eyre!("Failed to list recent builds: {}", e))
+}
+
+/// Computes counts of packages by their build status.
+pub fn get_build_counts(conn: &mut PgConnection) -> Result<BuildCounts> {
+    let rows = package::table
+        .select((package::id, package::build_status))
+        .load::<(i32, BuildStatus)>(conn)?;
+
+    let mut counts = BuildCounts::default();
+    counts.total = rows.len();
+    for (_, st) in rows {
+        match st {
+            BuildStatus::BUILDING => counts.building += 1,
+            BuildStatus::SUCCESS => counts.success += 1,
+            BuildStatus::FAILED => counts.failed += 1,
+            BuildStatus::PENDING => counts.pending += 1,
+            BuildStatus::SKIPPED => {}
+        }
+    }
+    Ok(counts)
 }
 

@@ -7,7 +7,7 @@
 url = "postgres://dbs:prueba123@127.0.0.1:9436/dbs"
 
 # Automatically record package synchronizations and build metrics in PostgreSQL
-record_db = false
+record_db = true
 
 [chroot]
 # Default chroot profile name or path (in mock/ or ../mock/)
@@ -74,3 +74,8 @@ server_name = "repos.tacos.org.mx"
 # Built-in HTTP repository server bind address and port
 server_host = "0.0.0.0"
 server_port = 8080
+
+[build]
+# Skip compiling packages if the exact version/release is already built (override with --force)
+skip_existing = true
+

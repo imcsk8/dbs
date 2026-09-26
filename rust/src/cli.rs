@@ -273,6 +273,14 @@ pub struct BuildArgs {
     /// Automatically download and cache missing source archives into the lookaside cache.
     #[arg(long, visible_alias = "sources", default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub fetch_sources: bool,
+
+    /// Skip building packages if the exact version/release RPM is already built (defaults to true).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub skip_existing: bool,
+
+    /// Force rebuild of package(s) even if the same version has already been built.
+    #[arg(short = 'f', long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]

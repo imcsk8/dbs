@@ -40,6 +40,7 @@ pub struct SpecMetadata {
 }
 
 static RPM_INIT: std::sync::Once = std::sync::Once::new();
+pub static RPM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Ensures that librpm is initialized once with default system configuration.
 pub fn ensure_rpm_initialized() {
@@ -50,6 +51,7 @@ pub fn ensure_rpm_initialized() {
 
 /// Expands RPM macros like `%{name}`, `%{version}`, `%{?dist}`, etc. using librpm's native macro engine.
 pub fn expand_macros(input: &str, macros: &HashMap<String, String>) -> String {
+    let _lock = RPM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_rpm_initialized();
     let ctx = librpm::macro_context::MacroContext::default();
     for (k, v) in macros {
@@ -71,6 +73,7 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
         return Err(eyre!("Spec file not found at {}", spec_path.display()));
     }
 
+    let _lock = RPM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     ensure_rpm_initialized();
 
     let spec_dir = spec_path
