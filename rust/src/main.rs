@@ -790,8 +790,11 @@ async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     }
 
     if args.fetch_sources {
-        let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
-        println!("\n▶ Synchronizing source archives into lookaside cache ({}) for packages in {}...", lookaside_mgr.root.display(), path.display());
+        let lookaside_mgr = LookasideManager::resolve_default(
+            lookaside_dir.as_deref());
+        println!("\n▶ Synchronizing source archives into lookaside cache ({}) \
+            for packages in {}...", lookaside_mgr.root.display(),
+            path.display());
         match lookaside_mgr.sync_dir(&path, concurrency).await {
             Ok(report) => {
                 if report.total_sources_found > 0 {
