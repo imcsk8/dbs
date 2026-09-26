@@ -16,7 +16,7 @@ pub fn list(conn: &mut PgConnection) -> Result<()> {
     }
 
     println!("===========================================================");
-    println!(" Registered Operating Systems (Database)");
+    println!(" Registered Distributions (Database)");
     println!("===========================================================");
     for os in systems {
         println!("  [{}] {} ({}) - Release: {}", os.id, os.name, os.version, os.release);
@@ -37,7 +37,7 @@ pub fn list(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// Adds a new operating system record to the database.
+/// Adds a new distribution record to the database.
 pub fn add(conn: &mut PgConnection, args: &AddOsArgs) -> Result<()> {
     // Look up or default architecture ID (1 for x86_64) and manager ID (1 for dnf)
     let arch_id = match args.architecture.to_lowercase().as_str() {
@@ -58,7 +58,7 @@ pub fn add(conn: &mut PgConnection, args: &AddOsArgs) -> Result<()> {
         system_type: args.system_type,
         release: args.release.clone(),
         architecture: arch_id,
-        summary: args.summary.clone().unwrap_or_else(|| format!("{} OS", args.name)),
+        summary: args.summary.clone().unwrap_or_else(|| format!("{} Distribution", args.name)),
         url: args.url.clone().unwrap_or_else(|| "https://localhost".to_string()),
         license: args.license.clone().unwrap_or_else(|| "GPL-2.0-or-later".to_string()),
         description: args.description.clone().unwrap_or_else(|| format!("{} distribution", args.name)),
@@ -73,17 +73,17 @@ pub fn add(conn: &mut PgConnection, args: &AddOsArgs) -> Result<()> {
     };
 
     let created = db::insert_operating_system(conn, &new_os)?;
-    println!("✓ Successfully registered operating system '{}' with ID {}", created.name, created.id);
+    println!("✓ Successfully registered distribution '{}' with ID {}", created.name, created.id);
     Ok(())
 }
 
-/// Deletes an operating system from the database by ID.
+/// Deletes a distribution record from the database by ID.
 pub fn delete(conn: &mut PgConnection, id: i32) -> Result<()> {
     let deleted = db::delete_operating_system(conn, id)?;
     if deleted > 0 {
-        println!("✓ Deleted operating system ID {}", id);
+        println!("✓ Deleted distribution ID {}", id);
     } else {
-        println!("Operating system ID {} not found.", id);
+        println!("Distribution ID {} not found.", id);
     }
     Ok(())
 }

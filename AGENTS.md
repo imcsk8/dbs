@@ -171,13 +171,13 @@ dbs lookaside get --pkg zstd --file zstd-1.5.7.tar.gz --hash <sha512> --dest ./S
 dbs lookaside gc --dry-run --distgit data/distgit
 ```
 
-### Operating System & Package Catalog Database Management
+### Distribution Catalog & Package Management
 ```bash
-# List supported operating system presets and registered database records
-dbs os list
+# List supported distribution presets and registered database records
+dbs distro list
 
-# Register a new operating system distribution
-dbs os add --name "TacOS" --version "1.0" --release "rolling" --architecture "x86_64" --distro-tag "eln"
+# Register a new distribution in the database catalog
+dbs distro add --name "TacOS" --version "1.0" --release "rolling" --architecture "x86_64" --distro-tag "tcrs"
 
 # Query package catalog in the database
 dbs pkg list

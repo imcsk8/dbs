@@ -116,6 +116,24 @@ pub fn delete_operating_system(conn: &mut PgConnection, os_id: i32) -> Result<us
     }
 }
 
+/// Alias for `list_operating_systems` under the unified distro domain.
+pub fn list_distributions(conn: &mut PgConnection) -> Result<Vec<OperatingSystem>> {
+    list_operating_systems(conn)
+}
+
+/// Alias for `insert_operating_system` under the unified distro domain.
+pub fn insert_distribution(
+    conn: &mut PgConnection,
+    new_distro: &NewOperatingSystem,
+) -> Result<OperatingSystem> {
+    insert_operating_system(conn, new_distro)
+}
+
+/// Alias for `delete_operating_system` under the unified distro domain.
+pub fn delete_distribution(conn: &mut PgConnection, distro_id: i32) -> Result<usize> {
+    delete_operating_system(conn, distro_id)
+}
+
 /// Queries packages from the package catalog with an optional limit.
 pub fn list_packages(conn: &mut PgConnection, limit: i64) -> Result<Vec<Package>> {
     match package::table.limit(limit).load::<Package>(conn) {

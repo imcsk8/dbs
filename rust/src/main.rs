@@ -605,51 +605,48 @@ async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     Ok(())
 }
 
-/// Dispatches the `os` subcommand.
+/// Dispatches the legacy/deprecated `os` subcommand (forwards to `distro`).
 async fn handle_os(args: OsArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    eprintln!("Notice: 'dbs os' is deprecated. Please use 'dbs distro' instead.\n");
     match args.command {
         cli::os::OsCommands::List => {
-            println!("===========================================================");
-            println!(" DBS Supported Operating System Presets (Static)");
-            println!("===========================================================");
-            for p in DistroConfig::all_presets() {
-                println!("  * Name:         {} ({})", p.name, p.version);
-                println!("    Dist-Git:     {}", p.dist_git_url_template);
-                println!("    Branch:       {}", p.dist_git_branch);
-                println!("    API Type:     {}", p.api_type);
-                if let Some(chroot) = p.mock_chroot {
-                    println!("    Mock Root:    {}", chroot);
-                }
-                println!();
-            }
-            println!("===========================================================");
-
-            match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
-                Ok(mut conn) => {
-                    let _ = cli::os_actions::list(&mut conn);
-                }
-                Err(e) => {
-                    println!("Note: Database not connected ({})", e);
-                }
-            }
+            handle_distro(
+                DistroArgs {
+                    action: DistroCommands::List,
+                },
+                dbs_cfg,
+            )
+            .await?;
         }
         cli::os::OsCommands::Add(add_args) => {
-            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
-            cli::os_actions::add(&mut conn, &add_args)?;
+            handle_distro(
+                DistroArgs {
+                    action: DistroCommands::Add(add_args),
+                },
+                dbs_cfg,
+            )
+            .await?;
         }
         cli::os::OsCommands::Delete { id } => {
-            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
-            cli::os_actions::delete(&mut conn, id)?;
+            handle_distro(
+                DistroArgs {
+                    action: DistroCommands::Delete { id },
+                },
+                dbs_cfg,
+            )
+            .await?;
         }
         cli::os::OsCommands::AddPackage(pkg_args) => {
             let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
             cli::os_actions::add_package(&mut conn, &pkg_args)?;
         }
         cli::os::OsCommands::Update(_) => {
-            println!("OS update action is not yet implemented.");
+            println!("Distribution update action is not yet implemented.");
         }
-        cli::os::OsCommands::Build { id } => {
-            println!("OS build orchestration for OS ID {}", id);
+        cli::os::OsCommands::Build { .. } => {
+            return Err(eyre!(
+                "'dbs os build' is deprecated. To compile a distribution, use 'dbs distro build' or 'dbs build <targets>'."
+            ));
         }
     }
     Ok(())
@@ -1147,6 +1144,42 @@ async fn handle_lookaside(args: LookasideArgs, dbs_cfg: &DbsConfig) -> Result<()
 /// Dispatches the `distro` subcommand to manage, build, publish, and serve distribution repositories.
 async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.action {
+        DistroCommands::List => {
+            println!("===========================================================");
+            println!(" DBS Supported Distribution Presets (Static)");
+            println!("===========================================================");
+            for p in DistroConfig::all_presets() {
+                println!("  * Name:         {} ({})", p.name, p.version);
+                println!("    Dist-Git:     {}", p.dist_git_url_template);
+                println!("    Branch:       {}", p.dist_git_branch);
+                println!("    API Type:     {}", p.api_type);
+                if let Some(chroot) = p.mock_chroot {
+                    println!("    Mock Root:    {}", chroot);
+                }
+                println!();
+            }
+            println!("===========================================================");
+
+            match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
+                Ok(mut conn) => {
+                    let _ = cli::os_actions::list(&mut conn);
+                }
+                Err(e) => {
+                    println!("Note: Database not connected ({})", e);
+                }
+            }
+        }
+
+        DistroCommands::Add(add_args) => {
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
+            cli::os_actions::add(&mut conn, &add_args)?;
+        }
+
+        DistroCommands::Delete { id } => {
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
+            cli::os_actions::delete(&mut conn, id)?;
+        }
+
         DistroCommands::Init {
             name,
             arch,

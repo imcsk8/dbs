@@ -216,8 +216,9 @@ Automate end-to-end repository initialization, DAG compilation, repodata indexin
 | `dbs lookaside` | `upload`, `get`, `sync`, `status`, `gc` | Maintain Content-Addressable Storage (CAS) for source archives with BTRFS CoW reflinks. |
 | `dbs chroot` / `mock` | `list`, `inspect`, `check`, `add`, `init` | Discover, inspect, validate, and manage custom Mock chroot configurations. |
 | `dbs db` | `bootstrap`, `status`, `reset`, `dump-schema` | Bootstrap embedded database schema, inspect table health, reset, or export raw SQL. |
-| `dbs os` | `list`, `add`, `delete` | Manage operating system distribution definitions and presets. |
+| `dbs distro` | `list`, `add`, `delete`, `init`, `build`, `publish`, `serve`, `status` | Manage distributions, presets, database catalog, and repository publishing lifecycle. |
 | `dbs pkg` | `list`, `add`, `delete` | Query and manage packages in the PostgreSQL supply chain catalog. |
+| `dbs os` | `list`, `add` *(deprecated)* | Legacy alias forwarding to `dbs distro`. |
 | **Global Flags** | `-c, --config <PATH>`, `-v, --verbose` | Specify custom TOML configuration file and toggle verbose debugging logs. |
 
 ---

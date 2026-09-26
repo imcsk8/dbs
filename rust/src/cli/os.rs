@@ -2,32 +2,32 @@ use clap::{Args, Subcommand};
 use crate::types::OsType;
 
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum OsCommands {
-    /// Add a new OS distribution to the build pipeline
-    Add(AddOsArgs),
-    /// List all available OS distributions
+    /// Add a new distribution to the database (deprecated: use 'dbs distro add')
+    Add(AddDistroArgs),
+    /// List all available distributions (deprecated: use 'dbs distro list')
     List,
-    /// Update an existing OS distribution
+    /// Update an existing distribution
     Update(UpdateOsArgs),
-    /// Delete an OS distribution by its ID
+    /// Delete a distribution by its ID (deprecated: use 'dbs distro delete')
     Delete {
-        /// The ID of the OS to delete
+        /// The ID of the distribution to delete
         #[arg(long)]
         id: i32,
     },
-    /// Associate a package with an OS distribution
+    /// Associate a package with a distribution
     AddPackage(AddPackageToOsArgs),
-    /// Build an operating system (placeholder)
+    /// Build a distribution (deprecated: use 'dbs distro build')
     Build {
-        /// The ID of the OS to build
+        /// The ID of the distribution to build
         #[arg(long)]
         id: i32,
     },
 }
 
-#[derive(Args, Debug)]
-pub struct AddOsArgs {
+#[derive(Args, Debug, Clone)]
+pub struct AddDistroArgs {
     #[arg(long)]
     pub name: String,
     #[arg(long)]
@@ -36,7 +36,7 @@ pub struct AddOsArgs {
     pub system_type: OsType,
     #[arg(long)]
     pub release: String,
-    #[arg(long)]
+    #[arg(long, default_value = "x86_64")]
     pub architecture: String,
     #[arg(long)]
     pub distro_tag: String,
@@ -52,7 +52,10 @@ pub struct AddOsArgs {
     pub description: Option<String>,
 }
 
-#[derive(Args, Debug)]
+/// Backward compatibility alias for AddDistroArgs.
+pub type AddOsArgs = AddDistroArgs;
+
+#[derive(Args, Debug, Clone)]
 pub struct UpdateOsArgs {
     #[arg(long)]
     pub id: i32,
@@ -80,7 +83,7 @@ pub struct UpdateOsArgs {
     pub description: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct AddPackageToOsArgs {
     /// ID of the Operating System
     #[arg(long)]

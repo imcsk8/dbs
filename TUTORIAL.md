@@ -646,8 +646,8 @@ Once the database is initialized, record dist-git synchronizations and build met
 # Sync packages from dist-git and register metadata + dependencies in the database:
 ./bin/dbs distgit sync --distro fedora-rawhide --search zstd --limit 5 --record-db
 
-# List tracked operating systems:
-./bin/dbs os list
+# List tracked distributions:
+./bin/dbs distro list
 
 # Query recorded packages:
 ./bin/dbs pkg list

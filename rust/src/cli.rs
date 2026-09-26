@@ -42,8 +42,8 @@ pub enum Commands {
     /// Compile packages using Mock, rpmbuild, or container runners.
     Build(BuildArgs),
 
-    /// Manage Operating System distribution presets and database records.
-    Os(OsArgs),
+    /// Manage distributions, presets, database records, and repository lifecycle.
+    Distro(DistroArgs),
 
     /// Query and manage package records in the database.
     Pkg(PkgArgs),
@@ -58,8 +58,10 @@ pub enum Commands {
     /// Manage, maintain, synchronize, and upload source archives into the dist-git lookaside cache.
     Lookaside(LookasideArgs),
 
-    /// Initialize, build, publish, sign, and serve complete distribution repositories.
-    Distro(DistroArgs),
+    /// [Deprecated: use 'distro'] Manage distribution presets and database records.
+    #[command(hide = true)]
+    Os(OsArgs),
+
 
     /// Manage database lifecycle, schema bootstrap, status, reset, and SQL schema dumps.
     Db(DbArgs),
@@ -499,6 +501,19 @@ pub struct DistroArgs {
 /// Actions supported by the `distro` subcommand.
 #[derive(Subcommand, Debug)]
 pub enum DistroCommands {
+    /// List available distribution presets (static) and registered database distributions.
+    List,
+
+    /// Register a new distribution in the database catalog.
+    Add(crate::cli::os::AddDistroArgs),
+
+    /// Delete a distribution record from the database by ID.
+    Delete {
+        /// The ID of the distribution to delete
+        #[arg(long)]
+        id: i32,
+    },
+
     /// Initialize a new distribution repository structure and Mock chroot profile.
     Init {
         /// Distribution identifier (e.g. tacos-stable-x86_64).

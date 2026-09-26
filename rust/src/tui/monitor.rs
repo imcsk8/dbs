@@ -539,7 +539,7 @@ impl MonitorModel {
             if let Some(masked) = &self.snapshot.db_url_masked {
                 lines.push(format!("• Database URI:     {}", masked));
             }
-            lines.push(format!("• Operating Systems:{}", self.snapshot.db_os_count));
+            lines.push(format!("• Registered Distros:{}", self.snapshot.db_os_count));
             lines.push(format!("• Tracked Packages: {}", self.snapshot.db_pkg_count));
         } else {
             lines.push(format!("• Connection:       {}", render_badge("OFFLINE", BadgeKind::Dim)));
