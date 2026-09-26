@@ -316,10 +316,10 @@ impl LookasideManager {
                 "https://src.fedoraproject.org/repo/pkgs/{}/{}/sha512/{}/{}",
                 pkg_name, filename, hash, filename
             ),
-            format!(
+            /*format!(
                 "https://sources.stream.centos.org/sources/rpms/{}/{}/sha512/{}/{}",
                 pkg_name, filename, hash, filename
-            ),
+            ),*/
         ];
 
         for url in &urls {
