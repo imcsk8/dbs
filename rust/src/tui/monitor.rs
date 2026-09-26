@@ -45,18 +45,25 @@ impl MonitorSnapshot {
     /// Collects a live snapshot of all DBS subsystems.
     pub fn collect(dbs_cfg: &DbsConfig, distro_name: &str) -> Self {
         let distro_dest = dbs_cfg.distro.dest.clone();
-        let (distro_status, distro_error) = match get_distro_status(distro_name, &distro_dest, "x86_64") {
+        let (distro_status, distro_error) = match get_distro_status(
+            distro_name,
+            &distro_dest, "x86_64") {
             Ok(st) => (Some(st), None),
             Err(e) => (None, Some(e.to_string())),
         };
 
-        let lookaside_mgr = LookasideManager::resolve_default(Some(&dbs_cfg.distgit.lookaside_dir));
+        let lookaside_mgr = LookasideManager::resolve_default(
+            Some(&dbs_cfg.distgit.lookaside_dir)
+        );
         let (lookaside_status, lookaside_error) = match lookaside_mgr.status() {
             Ok(st) => (Some(st), None),
             Err(e) => (None, Some(e.to_string())),
         };
-
-        let chroots = ChrootResolver::list_all(dbs_cfg.chroot.config_dir.as_deref(), true).unwrap_or_default();
+        // TODO: Remove unwraps
+        let chroots = ChrootResolver::list_all(
+            dbs_cfg.chroot.config_dir.as_deref(), 
+            true)
+            .unwrap_or_default();
 
         let raw_db_url = get_database_url();
         let db_url_masked = raw_db_url.as_ref().map(|u| {
