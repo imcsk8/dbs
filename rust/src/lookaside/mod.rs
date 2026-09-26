@@ -311,7 +311,7 @@ impl LookasideManager {
         dest: &Path,
     ) -> Result<bool> {
         let urls = [
-            format!("https://repos.tacos.org.mx/sources/{}/{}", pkg_name, filename),
+            //TODO: make this configurable format!("https://repos.tacos.org.mx/sources/{}/{}", pkg_name, filename),
             format!(
                 "https://src.fedoraproject.org/repo/pkgs/{}/{}/sha512/{}/{}",
                 pkg_name, filename, hash, filename
@@ -323,6 +323,7 @@ impl LookasideManager {
         ];
 
         for url in &urls {
+            //println!("Downloading: curl -f -L -s -S --connect-timeout 10 -o {:?} {}", dest, url);
             let status = Command::new("curl")
                 .arg("-f")
                 .arg("-L")
