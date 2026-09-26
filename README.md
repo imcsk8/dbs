@@ -8,15 +8,31 @@ A modern, high-throughput, distribution-agnostic operating system build platform
 
 ## Key Features
 
-* **Multi-Distribution Dist-Git Engine:** Pure Rust client supporting Fedora Rawhide (Pagure API), CentOS Stream 10/9 (GitLab API), TacOS (Forgejo/Codeberg API), and generic git repositories.
-* **Upstream Re-branding & Remotes:** Clone upstream dist-git repositories under their original names or custom names (`--as`, `--rename-spec`), while reconfiguring remotes (`--new-origin`) so `origin` points to your distribution and `upstream` tracks upstream changes.
-* **Topological DAG Compilation Engine:** Deterministic, non-recursive layered scheduler using **Kahn's algorithm (In-Degree BFS)** to resolve parallel compilation layers (Layer 0, Layer 1, ...) and immediately flag circular dependencies.
+* **Multi-Distribution Dist-Git Engine:** Pure Rust client supporting
+    Fedora Rawhide (Pagure API), CentOS Stream 10/9 (GitLab API),
+    TacOS (Forgejo/Codeberg API), and generic git repositories.
+* **Upstream Re-branding & Remotes:** Clone upstream dist-git repositories
+    under their original names or custom names (`--as`, `--rename-spec`),
+    while reconfiguring remotes (`--new-origin`) so `origin` points to your
+    distribution and `upstream` tracks upstream changes.
+* **Topological DAG (Directed Acyclic Graph) Compilation Engine:**
+    Deterministic, non-recursive layered scheduler parallel compilation 
+    layers resolution (Layer 0, Layer 1, ...) and immediately flag circular
+    dependencies.
 * **Hermetic Mock Runner:** Isolated build execution using Mock chroots with:
-  * Native parallel worker pools (`-j`) via Tokio async semaphores.
+  * Native parallel worker pools (`-j`).
   * Sequential Mock chain compilation (`--chain`).
-  * Dynamic local repository feedback (`--dynamic-repo`), automatically indexing built RPMs and feeding them back to concurrent workers via `--addrepo=file://...`.
-* **Content-Addressable Storage (CAS) & BTRFS Lookaside:** Native lookaside cache manager (`dbs lookaside`) storing source archives deduplicated by SHA-512 with Linux `FICLONE` Copy-on-Write (CoW) reflinks for instant, 0-disk-overhead source staging into Mock.
-* **PostgreSQL Supply Chain Catalog:** Diesel-backed relational schema tracking operating systems, packages (EVR, source RPMs, git commits), granular capability dependencies (`Provides`, `Requires`, `BuildRequires`), and staged binary RPM artifacts.
+  * Dynamic local repository feedback (`--dynamic-repo`), automatically
+    indexing built RPMs and feeding them back to concurrent workers via
+    `--addrepo=file://...`.
+* **Content-Addressable Storage (CAS) & BTRFS Lookaside:** Native lookaside
+  cache manager (`dbs lookaside`) storing source archives deduplicated by
+  SHA-512 with Linux Copy-on-Write (CoW) reflinks for instant,
+  0-disk-overhead source staging into Mock.
+* **PostgreSQL Supply Chain Catalog:** Diesel-backed relational schema
+  tracking operating systems, packages (EVR, source RPMs, git commits),
+  granular capability dependencies (`Provides`, `Requires`, `BuildRequires`),
+  and staged binary RPM artifacts.
 
 ---
 
@@ -29,18 +45,24 @@ Ensure your host system has the required build and packaging utilities installed
 * **Mock** (v6.0+)
 * **createrepo_c**
 * **git**
+* **rpm-devel**
 
 ```bash
 # On Fedora / ELN / CentOS Stream:
-sudo dnf install -y rust cargo mock createrepo_c git
+sudo dnf install -y rust cargo mock createrepo_c git rpm-devel
 sudo usermod -a -G mock $USER
 newgrp mock
 ```
 
 #### Recommended BTRFS Storage Setup (Optional for Production Builders)
-DBS is filesystem-agnostic and works out-of-the-box on any Linux filesystem (Ext4, XFS, tmpfs, ZFS) by automatically falling back to hardlinks or standard file copies. 
+DBS is filesystem-agnostic and works out-of-the-box on any Linux filesystem
+(Ext4, XFS, tmpfs, ZFS) by automatically falling back to hardlinks or standard
+file copies.
 
-For high-throughput builders, hosting `/srv/dbs/lookaside` on a dedicated **BTRFS subvolume** unlocks kernel-level Copy-on-Write (`FICLONE` ioctl) reflinks (instant 0.001s source staging with **0 extra bytes of disk space**) and transparent Zstandard compression:
+For high-throughput builders, hosting `/srv/dbs/lookaside` on a dedicated
+**BTRFS subvolume** unlocks kernel-level Copy-on-Write
+reflinks (instant 0.001s source staging with **0 extra bytes of disk space**)
+and transparent Zstandard compression:
 
 ```bash
 # 1. Create dedicated lookaside subvolume
@@ -55,9 +77,16 @@ sudo chown -R $USER:mock /srv/dbs/lookaside
 ```
 
 #### Recommended Host Kernel Tuning (High-Throughput Parallel Builds)
-When running high-concurrency builds (`dbs dag -j4`, `dbs build`), multiple Mock / `systemd-nspawn` workers run simultaneously under the same host UID. Build tools (Cargo, make jobservers, Ninja) and comprehensive test suites (`strace`, `glibc`) create thousands of IPC pipes.
+When running high-concurrency builds (`dbs dag -j4`, `dbs build`), multiple
+Mock / `systemd-nspawn` workers run simultaneously under the same host UID.
+Build tools (Cargo, make jobservers, Ninja) and comprehensive test suites
+(`strace`, `glibc`) create thousands of IPC pipes.
 
-By default, Linux limits an unprivileged UID to 16,384 pipe pages (only 1,024 pipes at 64 KB each) via `fs.pipe-user-pages-soft`. Exceeding this limit causes Linux to **silently demote newly created pipes to 2 pages (8 KB)** and reject `fcntl(F_SETPIPE_SZ)` expansions, triggering jobserver deadlocks, throughput collapse, or test failures.
+By default, Linux limits an unprivileged UID to 16,384 pipe pages
+(only 1,024 pipes at 64 KB each) via `fs.pipe-user-pages-soft`.
+Exceeding this limit causes Linux to **silently demote newly created pipes to 2
+pages (8 KB)** and reject `fcntl(F_SETPIPE_SZ)` expansions, triggering jobserver
+deadlocks, throughput collapse, or test failures.
 
 For dedicated build servers and CI nodes, install the provided host sysctl tuning profile:
 
@@ -84,7 +113,8 @@ The optimized release binary is located at `./bin/dbs`. Verify installation:
 
 ### 3. Declarative Configuration (`dbs.toml`)
 
-DBS eliminates long lists of command-line flags by providing a unified, declarative **TOML** configuration file.
+DBS eliminates long lists of command-line flags by providing a unified,
+declarative **TOML** configuration file.
 
 Generate a starter configuration file with:
 
@@ -106,11 +136,15 @@ View the active resolved configuration and loaded file path:
 
 The configuration defines four core sections:
 * `[database]`: PostgreSQL connection URL and metric auto-recording flags.
-* `[chroot]`: Mock chroot profile (`profile`), config directories, target architecture, and compilation SMP CPU flags.
-* `[distgit]`: Upstream distribution preset (`distro`), repository destination path (`dest`), lookaside cache path, and concurrency.
-* `[distro]`: Target distribution name, chroot, root destination, staging directory, base URL, GPG signing key, workers, and HTTP server settings.
+* `[chroot]`: Mock chroot profile (`profile`), config directories, target
+  architecture, and compilation SMP CPU flags.
+* `[distgit]`: Upstream distribution preset (`distro`), repository destination
+  path (`dest`), lookaside cache path, and concurrency.
+* `[distro]`: Target distribution name, chroot, root destination, staging directory,
+  base URL, GPG signing key, workers, and HTTP server settings.
 
-Command-line arguments always override configuration file settings, which in turn override built-in defaults.
+Command-line arguments always override configuration file settings, which in
+turn override built-in defaults.
 
 ### 4. Explore Remote Packages
 
@@ -182,7 +216,8 @@ Store, verify, and maintain source tarballs with zero-disk BTRFS reflinks:
 
 ### 9. Build & Publish Complete Distribution Repositories
 
-Automate end-to-end repository initialization, DAG compilation, repodata indexing, GPG signing, and web serving:
+Automate end-to-end repository initialization, DAG compilation, repodata indexing,
+GPG signing, and web serving:
 
 ```bash
 # Initialize a new distribution repository and Mock chroot profile
@@ -242,7 +277,8 @@ make clean     # Clean target and generated artifacts
 ### Database Provisioning & Management (Optional)
 
 DBS can track all packages, capabilities, build durations, and artifacts in PostgreSQL.
-When distributing `dbs`, **no Makefile or loose SQL scripts are required**—the complete schema is embedded directly into the binary:
+When distributing `dbs`, **no Makefile or loose SQL scripts are required**—the complete
+schema is embedded directly into the binary:
 
 ```bash
 # 1. Bootstrap schema and default seeds (reads DATABASE_URL, /etc/dbs/dbs.env, or .env):

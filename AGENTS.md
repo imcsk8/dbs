@@ -12,12 +12,19 @@ Welcome to the **Distribution Build System (DBS)** workspace. This document is t
 * **Language & Toolchain:** Rust (edition 2024), Cargo, Tokio async runtime.
 * **Database & ORM:** PostgreSQL with [Diesel](https://diesel.rs/) ORM (`diesel`).
 * **CLI Parser:** [Clap](https://crates.io/crates/clap) (v4 with derive macros).
-* **Network & Lookaside:** [Reqwest](https://crates.io/crates/reqwest) for Pagure/GitLab APIs and lookaside cache source archive downloads.
+* **Network & Lookaside:** [Reqwest](https://crates.io/crates/reqwest) for Pagure/GitLab/Forgejo APIs and lookaside cache source archive downloads.
 * **Build Runners (`BuildRunner` trait):**
   * `MockRunner`: Primary enterprise-grade hermetic chroot builds with `--chain` and dynamic local repository feedback (`--addrepo`).
   * `RpmbuildRunner`: Direct host-level execution for rapid debugging.
-* **Spec & RPM Engine:** Pure-Rust `.spec` file parser (`distgit::spec`) for dependency resolution and capability extraction without host tool dependencies.
+* **RPM Engine & C Bindings (`librpm`, `librpm-sys`):**
+  * Native C-level spec file parser (`librpm::build::Spec`) and macro engine (`librpm::macro_context::MacroContext`) for accurate parsing of complex RPM spec files.
+  * Thread-safety synchronization via `distgit::spec::RPM_LOCK` (`Mutex<()>`) protecting global RPM macro state across concurrent worker threads.
+  * Binary and source RPM header inspection (`librpm::package::PackageHeader`).
+  * Native EVR version comparison (`librpm::version::Version` / `rpmvercmp`).
+* **Smart Build Gate (`runner::gate`):** Pre-flight inspection comparing candidate spec/SRPM metadata against PostgreSQL records, staging artifacts, and distro repositories to skip redundant compilations.
 * **DAG & Build Ordering Engine:** Kahn's in-degree topological sort algorithm (`dag::DependencyGraph`) for computing parallel compilation layers with deterministic scheduling and explicit cycle detection.
+* **Live Telemetry & Dashboard:** Real-time worker heartbeat tracking, database state updates (`BUILDING`, `SUCCESS`, `FAILED`, `SKIPPED`), and interactive full-screen terminal dashboard (`dbs monitor`).
+
 
 ---
 
@@ -27,9 +34,11 @@ Welcome to the **Distribution Build System (DBS)** workspace. This document is t
 1. **Migration Parity:** The SQL definitions in `sql/` and `rust/migrations/2025-07-03-050157_supply_chain/` **MUST ALWAYS REMAIN 100% IDENTICAL**:
    * `sql/schema_up.sql` == `rust/migrations/2025-07-03-050157_supply_chain/up.sql`
    * `sql/schema_down.sql` == `rust/migrations/2025-07-03-050157_supply_chain/down.sql`
-2. **RPM Database Schema Compatibility:**
+2. **RPM Database Schema Compatibility & Telemetry:**
    * Package state tracking uses the `build_status` enum: `PENDING`, `BUILDING`, `SUCCESS`, `FAILED`, `SKIPPED`.
-   * Package metadata captures RPM EVR (`epoch`, `version`, `release`), source RPM names (`sourcerpm`), dist-git commit hashes, and spec paths.
+   * **Real-time Pipeline Telemetry:** When Mock workers spawn, packages immediately transition to `BUILDING` with `worker_id` attribution and timestamp recording, supporting periodic heartbeats for live monitoring.
+   * **Real Header EVR Extraction:** Upon build completion, `PackageHeader::from_file` extracts real `version`, `release`, and `sourcerpm` from generated RPM headers to ensure 100% fidelity in the database.
+   * **Domain Aliases:** High-level distribution functions (`db::list_distributions`, `db::insert_distribution`, `db::delete_distribution`) map to underlying `operating_system` tables without requiring schema migrations.
    * Granular capabilities are tracked in dedicated relational tables:
      * `package_provides`: Exported capabilities (`name`, `flags`, `version`).
      * `package_requires`: Required dependencies (`name`, `flags`, `version`, `is_build_require`).
@@ -50,9 +59,9 @@ DBS abstracts dist-git backends using `DistroConfig` and `DistGitClient`:
 
 ---
 
-## 5. Build Runner Evaluation & Trade-Offs
+## 5. Build Runner & RPM Engine Evaluation & Trade-Offs
 
-When selecting build runners for distribution packages:
+When selecting build runners and inspection engines for distribution packages:
 
 1. **Mock (`MockRunner`) - RECOMMENDED for Production Builds:**
    * **Pros:** Hermetic chroot isolation (`systemd-nspawn`), prevents undeclared build requirements, cross-distribution support (e.g. build CentOS on Fedora host), native `--chain` support and dynamic local repository feedback (`--addrepo=file://...`).
@@ -60,9 +69,9 @@ When selecting build runners for distribution packages:
 2. **Host `rpmbuild` (`RpmbuildRunner`):**
    * **Pros:** Fast, zero chroot setup overhead.
    * **Cons:** Pollutes host system, cannot easily build packages targeting a different distribution or glibc than the host, unsafe for untrusted specs.
-3. **Pure Rust / `librpm.rs` / `rpm-rs`:**
-   * **Pros:** Ideal for inspecting `.spec` files, parsing RPM headers, extracting EVR/Requires/Provides, and packing files into binary RPMs without external tools.
-   * **Cons:** Cannot compile arbitrary C/C++/Rust source trees on its own without invoking compilers and toolchains.
+3. **Native `librpm` / `librpm-sys` C Bindings:**
+   * **Pros:** High-fidelity spec parsing via `librpm::build::Spec`, macro expansion using `librpm::macro_context::MacroContext`, accurate EVR ordering with `librpm::version::Version` (`rpmvercmp`), and header inspection directly from RPM files without external CLI subprocesses. Thread-safety is guaranteed across workers via `RPM_LOCK`.
+   * **Cons:** Cannot compile arbitrary C/C++/Rust code directly without invoking compilers/Mock.
 
 ---
 
@@ -103,11 +112,16 @@ dbs distgit pull -o data/distgit
 dbs distgit inspect data/distgit/zstd/zstd.spec
 ```
 
-### Package Building
 ### Package Building & Orchestration
 ```bash
-# Build a single package in Mock chroot
+# Build a single package in Mock chroot (checks smart build gate by default)
 dbs build -r fedora-rawhide-x86_64 -o staging package.src.rpm
+
+# Smart Build Gate: Skips already built packages if version/release is up-to-date
+dbs build --config tacos.toml build strace
+
+# Force rebuild of existing package(s)
+dbs build --config tacos.toml build strace --force
 
 # Sequential Mock chain build with dynamic dependency resolution
 dbs build -r fedora-rawhide-x86_64 --chain -c -o staging pkg1.src.rpm pkg2.src.rpm
@@ -115,7 +129,7 @@ dbs build -r fedora-rawhide-x86_64 --chain -c -o staging pkg1.src.rpm pkg2.src.r
 # Parallel Mock worker pool with dynamic local repository feedback
 dbs build -r centos-stream-10-x86_64 -j 4 --dynamic-repo -o staging pkg1.spec pkg2.spec
 
-# Record build metrics and RPM artifacts to PostgreSQL database
+# Record build metrics, live telemetry, and RPM artifacts to PostgreSQL database
 dbs build -r fedora-rawhide-x86_64 --record-db -o staging pkg.spec
 ```
 
@@ -171,7 +185,7 @@ dbs lookaside get --pkg zstd --file zstd-1.5.7.tar.gz --hash <sha512> --dest ./S
 dbs lookaside gc --dry-run --distgit data/distgit
 ```
 
-### Distribution Catalog & Package Management
+### Distribution Lifecycle, Repository Publishing & Serving
 ```bash
 # List supported distribution presets and registered database records
 dbs distro list
@@ -179,6 +193,37 @@ dbs distro list
 # Register a new distribution in the database catalog
 dbs distro add --name "TacOS" --version "1.0" --release "rolling" --architecture "x86_64" --distro-tag "tcrs"
 
+# Delete a distribution from the database by ID
+dbs distro delete --id 4
+
+# Initialize a new distribution repository hierarchy and Mock chroot profile
+dbs distro init tacos-stable-x86_64 --arch x86_64 --channel stable --dist tcrs
+
+# Execute complete distribution build (DAG resolution + lookaside staging + Mock layers)
+dbs distro build tacos-stable-x86_64 -j 4 --record-db
+
+# Publish repository: layout RPMs, execute createrepo_c, optionally GPG sign, generate client .repo
+dbs distro publish --name tacos-stable-x86_64
+
+# Serve repository via lightweight built-in HTTP server or generate Nginx vhost config
+dbs distro serve --port 8080
+dbs distro serve --nginx-conf /etc/nginx/conf.d/tacos-repos.conf
+
+# Check distribution repository status and package count
+dbs distro status --name tacos-stable-x86_64
+
+# Note: 'dbs os' is deprecated and forwards transparently to 'dbs distro'
+```
+
+### Interactive Live System & Build Telemetry Dashboard
+```bash
+# Launch live interactive TUI dashboard (Overview, Live Builds Pipeline, Distros, Lookaside, Chroots, DB)
+dbs monitor
+dbs top
+```
+
+### Package Supply Chain Catalog
+```bash
 # Query package catalog in the database
 dbs pkg list
 ```
