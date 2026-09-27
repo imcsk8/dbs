@@ -24,6 +24,8 @@ charmed-bubbletea = { version = "0.2.4", features = ["async"] }
 charmed-lipgloss = "0.2.4"
 charmed-bubbles = "0.2.4"
 librpm = { version = "0.6.0", features = ["build"] }
+log = "0.4.34"
+env_logger = "0.11.11"
 
 [dev-dependencies]
 tempfile = "3"
