@@ -140,15 +140,14 @@ fn discover_rpms(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
                 let (sub_bin, sub_src) = discover_rpms(&p);
                 binaries.extend(sub_bin);
                 sources.extend(sub_src);
-            } else if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                if ext == "rpm" {
+            } else if let Some(ext) = p.extension().and_then(|s| s.to_str())
+                && ext == "rpm" {
                     if p.to_string_lossy().ends_with(".src.rpm") {
                         sources.push(p);
                     } else {
                         binaries.push(p);
                     }
                 }
-            }
         }
     }
 
@@ -209,12 +208,11 @@ pub fn publish_distro(opts: &DistroPublishOptions) -> Result<DistroPublishReport
             .arg(key_id)
             .output();
 
-        if let Ok(out) = export_out {
-            if out.status.success() && !out.stdout.is_empty() {
+        if let Ok(out) = export_out
+            && out.status.success() && !out.stdout.is_empty() {
                 let _ = fs::write(&gpg_key_file, out.stdout);
                 println!("✓ Exported distribution GPG public key to {}", gpg_key_file.display());
             }
-        }
 
         gpg_signed = true;
     }
@@ -542,7 +540,7 @@ mod tests {
         assert!(conf.contains("server_name repos.tacos.org.mx;"));
         assert!(conf.contains("root /srv/dbs/tacos/distro;"));
         assert!(conf.contains("location ~* /repodata/.*$"));
-        assert!(conf.contains("application/x-rpm") == false); // mime handled by extensions
+        assert!(!conf.contains("application/x-rpm")); // mime handled by extensions
     }
 
     #[test]

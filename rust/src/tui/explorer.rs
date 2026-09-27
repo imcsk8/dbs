@@ -66,17 +66,15 @@ impl ExplorerModel {
         initial_search: Option<&str>,
     ) -> Self {
         let mut cloned = HashSet::new();
-        if target_rpm_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&target_rpm_dir) {
+        if target_rpm_dir.exists()
+            && let Ok(entries) = fs::read_dir(&target_rpm_dir) {
                 for entry in entries.flatten() {
-                    if let Ok(ft) = entry.file_type() {
-                        if ft.is_dir() {
+                    if let Ok(ft) = entry.file_type()
+                        && ft.is_dir() {
                             cloned.insert(entry.file_name().to_string_lossy().to_string());
                         }
-                    }
                 }
             }
-        }
 
         let search_query = initial_search.unwrap_or("").to_string();
         let mut model = Self {
@@ -139,11 +137,10 @@ impl ExplorerModel {
         };
 
         let pkg_name = p.name.clone();
-        if let Some((cached_name, _)) = &self.cached_spec {
-            if cached_name == &pkg_name {
+        if let Some((cached_name, _)) = &self.cached_spec
+            && cached_name == &pkg_name {
                 return;
             }
-        }
 
         let pkg_dir = self.target_rpm_dir.join(&pkg_name);
         if pkg_dir.exists() {
@@ -358,8 +355,8 @@ impl Model for ExplorerModel {
                                     self.update_cached_spec();
                                 }
                             }
-                            'j' => {
-                                if self.cursor + 1 < self.filtered_indices.len() {
+                            'j'
+                                if self.cursor + 1 < self.filtered_indices.len() => {
                                     self.cursor += 1;
                                     let visible_rows = self.height.saturating_sub(12).max(5);
                                     if self.cursor >= self.scroll_offset + visible_rows {
@@ -367,7 +364,6 @@ impl Model for ExplorerModel {
                                     }
                                     self.update_cached_spec();
                                 }
-                            }
                             _ => {}
                         }
                     }
@@ -407,7 +403,7 @@ impl Model for ExplorerModel {
         };
 
         // Two-pane layout
-        let left_w = (width * 38 / 100).max(30).min(45);
+        let left_w = (width * 38 / 100).clamp(30, 45);
         let right_w = width.saturating_sub(left_w + 3).max(30);
         let list_h = height.saturating_sub(10).max(6);
 

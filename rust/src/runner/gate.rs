@@ -60,11 +60,10 @@ pub fn normalize_spec_release(raw_spec: &str, expanded_release: &str, dist_tag: 
     // 2. Query host %{?dist} from librpm macro context if initialized
     let _lock = crate::distgit::spec::RPM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let ctx = librpm::macro_context::MacroContext::default();
-    if let Ok(host_dist) = ctx.expand("%{?dist}") {
-        if !host_dist.is_empty() && expanded_release.contains(&host_dist) {
+    if let Ok(host_dist) = ctx.expand("%{?dist}")
+        && !host_dist.is_empty() && expanded_release.contains(&host_dist) {
             return expanded_release.replace(&host_dist, &clean_tag);
         }
-    }
 
     // 3. Fallback: check if the spec file preamble defined Release using %dist
     let has_dist_macro = raw_spec.lines().any(|l| {
@@ -126,7 +125,7 @@ pub fn check_package_already_built(
     target_path: &Path,
     distro_dest: Option<&Path>,
     staging_dir: Option<&Path>,
-    mut db_conn: Option<&mut PgConnection>,
+    db_conn: Option<&mut PgConnection>,
     dist_tag: Option<&str>,
 ) -> Result<Option<ExistingBuild>> {
     let target_meta = match extract_target_metadata(target_path, dist_tag) {
@@ -142,8 +141,8 @@ pub fn check_package_already_built(
     );
 
     // 1. Check PostgreSQL Database if available
-    if let Some(conn) = db_conn.as_deref_mut() {
-        if let Ok(pkgs) = package::table
+    if let Some(conn) = db_conn
+        && let Ok(pkgs) = package::table
             .filter(package::name.eq(&target_meta.name))
             .filter(package::build_status.eq(BuildStatus::SUCCESS))
             .load::<Package>(conn)
@@ -157,13 +156,13 @@ pub fn check_package_already_built(
                 {
                     for art in arts {
                         let path = PathBuf::from(&art.rpm_path);
-                        if path.exists() {
-                            if let Ok(hdr) = PackageHeader::from_file(&path, Some(&VerifyOptions::skip_verification())) {
-                                if hdr.name() == target_meta.name {
+                        if path.exists()
+                            && let Ok(hdr) = PackageHeader::from_file(&path, Some(&VerifyOptions::skip_verification()))
+                                && hdr.name() == target_meta.name {
                                     let art_epoch_str = hdr.epoch().map(|e| e.to_string());
-                                    if let Some(art_ver) = Version::new(art_epoch_str.as_deref(), hdr.version(), Some(hdr.release())) {
-                                        if let Some(t_ver) = &target_ver {
-                                            if art_ver >= *t_ver {
+                                    if let Some(art_ver) = Version::new(art_epoch_str.as_deref(), hdr.version(), Some(hdr.release()))
+                                        && let Some(t_ver) = &target_ver
+                                            && art_ver >= *t_ver {
                                                 return Ok(Some(ExistingBuild {
                                                     name: target_meta.name,
                                                     version: hdr.version().to_string(),
@@ -172,19 +171,15 @@ pub fn check_package_already_built(
                                                     source: "database".to_string(),
                                                 }));
                                             }
-                                        }
-                                    }
                                 }
-                            }
-                        }
                     }
                 }
 
                 // Also check if package record has matching version/release
-                if p.version != "0.0.0" {
-                    if let Some(p_ver) = Version::new(None, &p.version, Some(&p.release)) {
-                        if let Some(t_ver) = &target_ver {
-                            if p_ver >= *t_ver {
+                if p.version != "0.0.0"
+                    && let Some(p_ver) = Version::new(None, &p.version, Some(&p.release))
+                        && let Some(t_ver) = &target_ver
+                            && p_ver >= *t_ver {
                                 return Ok(Some(ExistingBuild {
                                     name: target_meta.name,
                                     version: p.version,
@@ -193,16 +188,12 @@ pub fn check_package_already_built(
                                     source: "database".to_string(),
                                 }));
                             }
-                        }
-                    }
-                }
             }
         }
-    }
 
     // 2. Check Staging Directory
-    if let Some(stg) = staging_dir {
-        if stg.exists() {
+    if let Some(stg) = staging_dir
+        && stg.exists() {
             let mut search_dirs = Vec::new();
             if let Ok(entries) = fs::read_dir(stg) {
                 for entry in entries.flatten() {
@@ -223,13 +214,13 @@ pub fn check_package_already_built(
                         let path = entry.path();
                         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rpm") {
                             let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                            if !fname.ends_with(".src.rpm") && fname.starts_with(&format!("{}-", target_meta.name)) {
-                                if let Ok(hdr) = PackageHeader::from_file(&path, Some(&VerifyOptions::skip_verification())) {
-                                    if hdr.name() == target_meta.name {
+                            if !fname.ends_with(".src.rpm") && fname.starts_with(&format!("{}-", target_meta.name))
+                                && let Ok(hdr) = PackageHeader::from_file(&path, Some(&VerifyOptions::skip_verification()))
+                                    && hdr.name() == target_meta.name {
                                         let h_epoch = hdr.epoch().map(|e| e.to_string());
-                                        if let Some(existing_ver) = Version::new(h_epoch.as_deref(), hdr.version(), Some(hdr.release())) {
-                                            if let Some(t_ver) = &target_ver {
-                                                if existing_ver >= *t_ver {
+                                        if let Some(existing_ver) = Version::new(h_epoch.as_deref(), hdr.version(), Some(hdr.release()))
+                                            && let Some(t_ver) = &target_ver
+                                                && existing_ver >= *t_ver {
                                                     return Ok(Some(ExistingBuild {
                                                         name: target_meta.name,
                                                         version: hdr.version().to_string(),
@@ -238,21 +229,16 @@ pub fn check_package_already_built(
                                                         source: "staging".to_string(),
                                                     }));
                                                 }
-                                            }
-                                        }
                                     }
-                                }
-                            }
                         }
                     }
                 }
             }
         }
-    }
 
     // 3. Check Target Distribution Directory
-    if let Some(dest) = distro_dest {
-        if dest.exists() {
+    if let Some(dest) = distro_dest
+        && dest.exists() {
             let mut search_dirs = vec![
                 dest.to_path_buf(),
                 dest.join("x86_64"),
@@ -274,13 +260,13 @@ pub fn check_package_already_built(
                         let path = entry.path();
                         if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("rpm") {
                             let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                            if !fname.ends_with(".src.rpm") && fname.starts_with(&format!("{}-", target_meta.name)) {
-                                if let Ok(hdr) = PackageHeader::from_file(&path, Some(&VerifyOptions::skip_verification())) {
-                                    if hdr.name() == target_meta.name {
+                            if !fname.ends_with(".src.rpm") && fname.starts_with(&format!("{}-", target_meta.name))
+                                && let Ok(hdr) = PackageHeader::from_file(&path, Some(&VerifyOptions::skip_verification()))
+                                    && hdr.name() == target_meta.name {
                                         let h_epoch = hdr.epoch().map(|e| e.to_string());
-                                        if let Some(existing_ver) = Version::new(h_epoch.as_deref(), hdr.version(), Some(hdr.release())) {
-                                            if let Some(t_ver) = &target_ver {
-                                                if existing_ver >= *t_ver {
+                                        if let Some(existing_ver) = Version::new(h_epoch.as_deref(), hdr.version(), Some(hdr.release()))
+                                            && let Some(t_ver) = &target_ver
+                                                && existing_ver >= *t_ver {
                                                     return Ok(Some(ExistingBuild {
                                                         name: target_meta.name,
                                                         version: hdr.version().to_string(),
@@ -289,17 +275,12 @@ pub fn check_package_already_built(
                                                         source: "distro_repo".to_string(),
                                                     }));
                                                 }
-                                            }
-                                        }
                                     }
-                                }
-                            }
                         }
                     }
                 }
             }
         }
-    }
 
     Ok(None)
 }

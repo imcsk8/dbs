@@ -188,10 +188,10 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
                 }
             }
 
-            return Ok(meta);
+            Ok(meta)
         },
-        None => return Err(eyre!("Failed to parse spec file: {}", spec_str)),
-    };
+        None => Err(eyre!("Failed to parse spec file: {}", spec_str)),
+    }
 }
 
 #[cfg(test)]

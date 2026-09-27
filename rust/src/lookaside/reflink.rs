@@ -38,20 +38,13 @@ impl std::fmt::Display for ReflinkMode {
 pub fn reflink_file(src: &Path, dst: &Path) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
-    let src_file = match File::open(src) {
-        Ok(f) => f,
-        Err(e) => return Err(e),
-    };
+    let src_file = File::open(src)?;
 
-    let dst_file = match OpenOptions::new()
+    let dst_file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(dst)
-    {
-        Ok(f) => f,
-        Err(e) => return Err(e),
-    };
+        .open(dst)?;
 
     // FICLONE ioctl command: _IOW(0x94, 9, int) = 0x40049409
     const FICLONE: libc::c_ulong = 0x40049409;
@@ -78,11 +71,10 @@ pub fn reflink_file(_src: &Path, _dst: &Path) -> io::Result<()> {
 /// Automatically clones or copies `src` to `dst`, attempting BTRFS reflink first,
 /// falling back to hard link if possible, and ultimately standard file copy.
 pub fn reflink_or_copy(src: &Path, dst: &Path) -> io::Result<ReflinkMode> {
-    if let Some(parent) = dst.parent() {
-        if !parent.exists() {
+    if let Some(parent) = dst.parent()
+        && !parent.exists() {
             fs::create_dir_all(parent)?;
         }
-    }
 
     // Attempt BTRFS/XFS FICLONE reflink first
     match reflink_file(src, dst) {

@@ -7,6 +7,9 @@ build:
 test:
 	cargo test
 
+lint:
+	cargo clippy
+
 run:
 	cargo run
 

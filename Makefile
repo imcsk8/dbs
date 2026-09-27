@@ -49,6 +49,9 @@ build:
 test:
 	make -C rust test
 
+lint:
+	make -C rust lint
+
 run: .env
 	make -C rust run
 

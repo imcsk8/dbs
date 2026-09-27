@@ -10,6 +10,7 @@ use eyre::{eyre, Result};
 
 /// Root configuration structure representing `dbs.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct DbsConfig {
     #[serde(default)]
     pub database: DatabaseConfig,
@@ -27,17 +28,6 @@ pub struct DbsConfig {
     pub build: BuildConfig,
 }
 
-impl Default for DbsConfig {
-    fn default() -> Self {
-        Self {
-            database: DatabaseConfig::default(),
-            chroot: ChrootConfig::default(),
-            distgit: DistgitConfig::default(),
-            distro: DistroSettings::default(),
-            build: BuildConfig::default(),
-        }
-    }
-}
 
 /// Settings for package compilation and smart build gating.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +51,7 @@ impl Default for BuildConfig {
 
 /// Settings for PostgreSQL database connectivity and metric recording.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct DatabaseConfig {
     /// PostgreSQL connection URL (e.g. postgres://dbs:password@127.0.0.1:5432/dbs).
     pub url: Option<String>,
@@ -70,14 +61,6 @@ pub struct DatabaseConfig {
     pub record_db: bool,
 }
 
-impl Default for DatabaseConfig {
-    fn default() -> Self {
-        Self {
-            url: None,
-            record_db: false,
-        }
-    }
-}
 
 /// Settings for Mock chroot environments and compilation isolation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

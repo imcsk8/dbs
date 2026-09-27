@@ -175,11 +175,10 @@ impl DistGitClient {
                         git_url,
                     });
 
-                    if let Some(max) = limit {
-                        if results.len() >= max {
+                    if let Some(max) = limit
+                        && results.len() >= max {
                             return Ok(results);
                         }
-                    }
                 }
             }
 
@@ -263,11 +262,10 @@ impl DistGitClient {
                         git_url,
                     });
 
-                    if let Some(max) = limit {
-                        if results.len() >= max {
+                    if let Some(max) = limit
+                        && results.len() >= max {
                             return Ok(results);
                         }
-                    }
                 }
             }
 
@@ -347,11 +345,10 @@ impl DistGitClient {
                         git_url,
                     });
 
-                    if let Some(max) = limit {
-                        if results.len() >= max {
+                    if let Some(max) = limit
+                        && results.len() >= max {
                             return Ok(results);
                         }
-                    }
                 }
             }
 

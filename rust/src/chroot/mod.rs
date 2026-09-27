@@ -407,8 +407,7 @@ impl ChrootResolver {
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let root_path = stdout_str
                 .lines()
-                .filter(|line| !line.starts_with("WARNING") && !line.starts_with("INFO"))
-                .last()
+                .rfind(|line| !line.starts_with("WARNING") && !line.starts_with("INFO"))
                 .map(|s| s.trim().to_string());
 
             Ok(CheckReport {
@@ -460,11 +459,10 @@ impl ChrootResolver {
                 if let Ok(entries) = fs::read_dir(&src_templates) {
                     for entry in entries.flatten() {
                         let p = entry.path();
-                        if p.is_file() {
-                            if let Some(t_name) = p.file_name() {
+                        if p.is_file()
+                            && let Some(t_name) = p.file_name() {
                                 let _ = fs::copy(&p, dest_templates.join(t_name));
                             }
-                        }
                     }
                 }
             }
@@ -587,15 +585,13 @@ fn extract_includes(content: &str) -> Vec<String> {
     let mut includes = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("include(") {
-            let rest = &trimmed["include(".len()..];
-            if let Some(quote_char) = rest.chars().next() {
-                if quote_char == '\'' || quote_char == '"' {
-                    let after_quote = &rest[1..];
-                    if let Some(end) = after_quote.find(quote_char) {
-                        includes.push(after_quote[..end].to_string());
-                    }
-                }
+        if let Some(rest) = trimmed.strip_prefix("include(")
+            && let Some(quote_char) = rest.chars().next()
+            && (quote_char == '\'' || quote_char == '"')
+        {
+            let after_quote = &rest[1..];
+            if let Some(end) = after_quote.find(quote_char) {
+                includes.push(after_quote[..end].to_string());
             }
         }
     }

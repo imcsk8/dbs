@@ -37,22 +37,20 @@ pub fn get_database_url() -> Option<String> {
     }
 
     for path in &candidates {
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(path) {
+        if path.exists()
+            && let Ok(content) = fs::read_to_string(path) {
                 for line in content.lines() {
                     let trimmed = line.trim();
                     if trimmed.is_empty() || trimmed.starts_with('#') {
                         continue;
                     }
-                    if let Some((k, v)) = trimmed.split_once('=') {
-                        if k.trim() == "DATABASE_URL" {
+                    if let Some((k, v)) = trimmed.split_once('=')
+                        && k.trim() == "DATABASE_URL" {
                             let val = v.trim().trim_matches('"').trim_matches('\'');
                             return Some(val.to_string());
                         }
-                    }
                 }
             }
-        }
     }
     None
 }
@@ -398,12 +396,11 @@ pub fn record_build_result(
         if is_src && real_sourcerpm.is_none() {
             real_sourcerpm = Some(filename.to_string());
         }
-        if let Ok(hdr) = librpm::package::PackageHeader::from_file(art, Some(&librpm::verify::VerifyOptions::skip_verification())) {
-            if real_version.is_none() && !hdr.is_source() {
+        if let Ok(hdr) = librpm::package::PackageHeader::from_file(art, Some(&librpm::verify::VerifyOptions::skip_verification()))
+            && real_version.is_none() && !hdr.is_source() {
                 real_version = Some(hdr.version().to_string());
                 real_release = Some(hdr.release().to_string());
             }
-        }
         let size = fs::metadata(art).map(|m| m.len() as i64).unwrap_or(0);
         let new_art = NewPackageArtifact {
             id_package: Some(pkg_id),
@@ -515,8 +512,10 @@ pub fn get_build_counts(conn: &mut PgConnection) -> Result<BuildCounts> {
         .select((package::id, package::build_status))
         .load::<(i32, BuildStatus)>(conn)?;
 
-    let mut counts = BuildCounts::default();
-    counts.total = rows.len();
+    let mut counts = BuildCounts {
+        total: rows.len(),
+        ..Default::default()
+    };
     for (_, st) in rows {
         match st {
             BuildStatus::BUILDING => counts.building += 1,

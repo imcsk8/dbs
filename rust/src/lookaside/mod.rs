@@ -89,11 +89,10 @@ impl LookasideManager {
             return Self::new(p.to_path_buf());
         }
 
-        if let Ok(env_path) = std::env::var("DBS_LOOKASIDE_DIR") {
-            if !env_path.trim().is_empty() {
+        if let Ok(env_path) = std::env::var("DBS_LOOKASIDE_DIR")
+            && !env_path.trim().is_empty() {
                 return Self::new(PathBuf::from(env_path));
             }
-        }
 
         let sys_path = Path::new(DEFAULT_LOOKASIDE_PATH);
         if sys_path.exists() {
@@ -101,11 +100,10 @@ impl LookasideManager {
         }
 
         // If /srv/dbs exists, use /srv/dbs/lookaside
-        if let Some(parent) = sys_path.parent() {
-            if parent.exists() {
+        if let Some(parent) = sys_path.parent()
+            && parent.exists() {
                 return Self::new(sys_path.to_path_buf());
             }
-        }
 
         Self::new(PathBuf::from(LOCAL_LOOKASIDE_FALLBACK))
     }
@@ -337,11 +335,10 @@ impl LookasideManager {
                 .arg(url)
                 .status();
 
-            if let Ok(st) = status {
-                if st.success() && dest.exists() {
+            if let Ok(st) = status
+                && st.success() && dest.exists() {
                     return Ok(true);
                 }
-            }
         }
 
         Ok(false)
@@ -356,29 +353,26 @@ impl LookasideManager {
         let mut total_package_entries = 0;
 
         let cas_dir = self.cas_dir();
-        if cas_dir.exists() {
-            if let Ok(subdirs) = fs::read_dir(&cas_dir) {
+        if cas_dir.exists()
+            && let Ok(subdirs) = fs::read_dir(&cas_dir) {
                 for sub in subdirs.flatten() {
                     let p = sub.path();
-                    if p.is_dir() {
-                        if let Ok(files) = fs::read_dir(&p) {
+                    if p.is_dir()
+                        && let Ok(files) = fs::read_dir(&p) {
                             for f in files.flatten() {
-                                if let Ok(meta) = f.metadata() {
-                                    if meta.is_file() {
+                                if let Ok(meta) = f.metadata()
+                                    && meta.is_file() {
                                         total_cas_objects += 1;
                                         total_cas_bytes += meta.len();
                                     }
-                                }
                             }
                         }
-                    }
                 }
             }
-        }
 
         let pkgs_dir = self.pkgs_dir();
-        if pkgs_dir.exists() {
-            if let Ok(entries) = fs::read_dir(&pkgs_dir) {
+        if pkgs_dir.exists()
+            && let Ok(entries) = fs::read_dir(&pkgs_dir) {
                 for entry in entries.flatten() {
                     if entry.path().is_dir() {
                         total_packages += 1;
@@ -386,7 +380,6 @@ impl LookasideManager {
                     }
                 }
             }
-        }
 
         Ok(LookasideStatus {
             root: self.root.clone(),
@@ -410,23 +403,22 @@ impl LookasideManager {
         }
 
         // 2. Scan dist-git sources files if provided
-        if let Some(distgit) = distgit_dir {
-            if distgit.exists() {
+        if let Some(distgit) = distgit_dir
+            && distgit.exists() {
                 collect_hashes_from_sources_manifests(distgit, &mut referenced_hashes);
             }
-        }
 
         let mut scanned = 0;
         let mut orphaned = Vec::new();
         let mut reclaimed_bytes = 0;
 
         let cas_dir = self.cas_dir();
-        if cas_dir.exists() {
-            if let Ok(subdirs) = fs::read_dir(&cas_dir) {
+        if cas_dir.exists()
+            && let Ok(subdirs) = fs::read_dir(&cas_dir) {
                 for sub in subdirs.flatten() {
                     let p = sub.path();
-                    if p.is_dir() {
-                        if let Ok(files) = fs::read_dir(&p) {
+                    if p.is_dir()
+                        && let Ok(files) = fs::read_dir(&p) {
                             for f in files.flatten() {
                                 let file_path = f.path();
                                 if file_path.is_file() {
@@ -448,10 +440,8 @@ impl LookasideManager {
                                 }
                             }
                         }
-                    }
                 }
             }
-        }
 
         Ok(GcReport {
             scanned_objects: scanned,

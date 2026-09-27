@@ -120,8 +120,8 @@ impl DependencyGraph {
                 let clean_req = req.split_whitespace().next().unwrap_or(req).trim();
 
                 // Check if this capability is provided by one of our workspace packages
-                if let Some(provider) = self.provides_map.get(clean_req) {
-                    if provider != pkg {
+                if let Some(provider) = self.provides_map.get(clean_req)
+                    && provider != pkg {
                         self.dependencies
                             .entry(pkg.clone())
                             .or_default()
@@ -132,7 +132,6 @@ impl DependencyGraph {
                             .or_default()
                             .insert(pkg.clone());
                     }
-                }
             }
         }
     }
@@ -221,16 +220,22 @@ mod tests {
     fn test_kahn_layers_linear() {
         let mut graph = DependencyGraph::new();
 
-        let mut meta_a = SpecMetadata::default();
-        meta_a.name = "pkg-a".to_string();
+        let meta_a = SpecMetadata {
+            name: "pkg-a".to_string(),
+            ..Default::default()
+        };
 
-        let mut meta_b = SpecMetadata::default();
-        meta_b.name = "pkg-b".to_string();
-        meta_b.build_requires = vec!["pkg-a".to_string()];
+        let meta_b = SpecMetadata {
+            name: "pkg-b".to_string(),
+            build_requires: vec!["pkg-a".to_string()],
+            ..Default::default()
+        };
 
-        let mut meta_c = SpecMetadata::default();
-        meta_c.name = "pkg-c".to_string();
-        meta_c.build_requires = vec!["pkg-b".to_string()];
+        let meta_c = SpecMetadata {
+            name: "pkg-c".to_string(),
+            build_requires: vec!["pkg-b".to_string()],
+            ..Default::default()
+        };
 
         graph.add_package(meta_a);
         graph.add_package(meta_b);
@@ -248,15 +253,21 @@ mod tests {
     fn test_kahn_parallel_branches() {
         let mut graph = DependencyGraph::new();
 
-        let mut meta_a = SpecMetadata::default();
-        meta_a.name = "pkg-a".to_string();
+        let meta_a = SpecMetadata {
+            name: "pkg-a".to_string(),
+            ..Default::default()
+        };
 
-        let mut meta_b = SpecMetadata::default();
-        meta_b.name = "pkg-b".to_string();
+        let meta_b = SpecMetadata {
+            name: "pkg-b".to_string(),
+            ..Default::default()
+        };
 
-        let mut meta_c = SpecMetadata::default();
-        meta_c.name = "pkg-c".to_string();
-        meta_c.build_requires = vec!["pkg-a".to_string(), "pkg-b".to_string()];
+        let meta_c = SpecMetadata {
+            name: "pkg-c".to_string(),
+            build_requires: vec!["pkg-a".to_string(), "pkg-b".to_string()],
+            ..Default::default()
+        };
 
         graph.add_package(meta_a);
         graph.add_package(meta_b);
@@ -273,13 +284,17 @@ mod tests {
     fn test_kahn_cycle_detected() {
         let mut graph = DependencyGraph::new();
 
-        let mut meta_x = SpecMetadata::default();
-        meta_x.name = "pkg-x".to_string();
-        meta_x.build_requires = vec!["pkg-y".to_string()];
+        let meta_x = SpecMetadata {
+            name: "pkg-x".to_string(),
+            build_requires: vec!["pkg-y".to_string()],
+            ..Default::default()
+        };
 
-        let mut meta_y = SpecMetadata::default();
-        meta_y.name = "pkg-y".to_string();
-        meta_y.build_requires = vec!["pkg-x".to_string()];
+        let meta_y = SpecMetadata {
+            name: "pkg-y".to_string(),
+            build_requires: vec!["pkg-x".to_string()],
+            ..Default::default()
+        };
 
         graph.add_package(meta_x);
         graph.add_package(meta_y);

@@ -57,15 +57,14 @@ pub fn parse_sources_file(path: &Path) -> Result<Vec<DistgitSourceEntry>> {
         }
 
         // Format 1: Fedora standard - SHA512 (filename) = hash
-        if let Some(m) = trimmed.strip_prefix("SHA512 (") {
-            if let Some((fname, h)) = m.split_once(") = ") {
+        if let Some(m) = trimmed.strip_prefix("SHA512 (")
+            && let Some((fname, h)) = m.split_once(") = ") {
                 entries.push(DistgitSourceEntry {
                     filename: fname.trim().to_string(),
                     hash: h.trim().to_string(),
                 });
                 continue;
             }
-        }
 
         // Format 2: Legacy dist-git - hash  filename
         if let Some((h, fname)) = trimmed.split_once([' ', '\t']) {
@@ -88,10 +87,7 @@ pub fn update_sources_manifest(dir: &Path, filename: &str, hash: &str) -> Result
     let manifest_path = dir.join("sources");
 
     let mut existing_entries = if manifest_path.exists() {
-        match parse_sources_file(&manifest_path) {
-            Ok(e) => e,
-            Err(_) => Vec::new(),
-        }
+        parse_sources_file(&manifest_path).unwrap_or_default()
     } else {
         Vec::new()
     };

@@ -131,11 +131,10 @@ impl MockRunner {
         let start_time = Instant::now();
 
         // Record build started state in database
-        if let Some(db_url) = &self.db_url {
-            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+        if let Some(db_url) = &self.db_url
+            && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                 let _ = crate::db::record_build_start(&mut conn, pkg_stem, Some(worker_id as i32), Some(&log_path.display().to_string()));
             }
-        }
 
         let is_srpm = input_path.to_string_lossy().ends_with(".src.rpm");
 
@@ -190,11 +189,10 @@ impl MockRunner {
                     artifacts: Vec::new(),
                     error_summary: Some(error_summary),
                 };
-                if let Some(db_url) = &self.db_url {
-                    if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                if let Some(db_url) = &self.db_url
+                    && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                         let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
                     }
-                }
                 return Ok(out);
             }
 
@@ -209,11 +207,10 @@ impl MockRunner {
                         artifacts: Vec::new(),
                         error_summary: Some("Mock --buildsrpm succeeded but no .src.rpm was created".to_string()),
                     };
-                    if let Some(db_url) = &self.db_url {
-                        if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+                    if let Some(db_url) = &self.db_url
+                        && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                             let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
                         }
-                    }
                     return Ok(out);
                 }
             }
@@ -229,12 +226,11 @@ impl MockRunner {
             rebuild_cmd.arg(format!("--configdir={}", cfg.display()));
         }
 
-        if let Some(repo) = &self.local_repo_dir {
-            if repo.exists() {
+        if let Some(repo) = &self.local_repo_dir
+            && repo.exists() {
                 let abs_repo = fs::canonicalize(repo).unwrap_or_else(|_| repo.clone());
                 rebuild_cmd.arg(format!("--addrepo=file://{}", abs_repo.display()));
             }
-        }
 
         rebuild_cmd.arg("--rebuild").arg(&target_srpm);
 
@@ -274,11 +270,10 @@ impl MockRunner {
             error_summary,
         };
 
-        if let Some(db_url) = &self.db_url {
-            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+        if let Some(db_url) = &self.db_url
+            && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                 let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
             }
-        }
 
         Ok(out)
     }
@@ -294,14 +289,13 @@ impl MockRunner {
         let log_path = result_dir.join("chain.log");
         let start_time = Instant::now();
 
-        if let Some(db_url) = &self.db_url {
-            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+        if let Some(db_url) = &self.db_url
+            && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                 for target in targets {
                     let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
                     let _ = crate::db::record_build_start(&mut conn, pkg_stem, Some(1), Some(&log_path.display().to_string()));
                 }
             }
-        }
 
         // Convert any .spec targets to .src.rpm first
         let mut srpms = Vec::new();
@@ -396,14 +390,13 @@ impl MockRunner {
             error_summary,
         };
 
-        if let Some(db_url) = &self.db_url {
-            if let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
+        if let Some(db_url) = &self.db_url
+            && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                 for target in targets {
                     let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
                     let _ = crate::db::record_build_result(&mut conn, pkg_stem, &out);
                 }
             }
-        }
 
         Ok(out)
     }
@@ -548,11 +541,10 @@ pub fn update_local_repo(repo_dir: &Path) {
         .arg(repo_dir)
         .status();
 
-    if let Ok(st) = update_res {
-        if st.success() {
+    if let Ok(st) = update_res
+        && st.success() {
             return;
         }
-    }
 
     let _ = Command::new("createrepo_c")
         .arg("--quiet")
@@ -562,20 +554,10 @@ pub fn update_local_repo(repo_dir: &Path) {
 
 /// Reads up to `max_bytes` from the tail of a file, returning its lines.
 fn read_tail_lines(path: &Path, max_bytes: u64) -> std::io::Result<Vec<String>> {
-    let mut file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => return Err(e),
-    };
-    let metadata = match file.metadata() {
-        Ok(m) => m,
-        Err(e) => return Err(e),
-    };
+    let mut file = fs::File::open(path)?;
+    let metadata = file.metadata()?;
     let file_len = metadata.len();
-    let read_start = if file_len > max_bytes {
-        file_len - max_bytes
-    } else {
-        0
-    };
+    let read_start = file_len.saturating_sub(max_bytes);
 
     match file.seek(SeekFrom::Start(read_start)) {
         Ok(_) => (),
@@ -593,8 +575,8 @@ fn read_tail_lines(path: &Path, max_bytes: u64) -> std::io::Result<Vec<String>> 
 
 /// Extracts a concise, actionable error summary line from Mock's `build.log` or runner output.
 fn extract_error_summary(log_path: &Path, wrapper_stdout: &str, wrapper_stderr: &str) -> String {
-    if log_path.exists() {
-        if let Ok(lines) = read_tail_lines(log_path, 1024 * 1024) {
+    if log_path.exists()
+        && let Ok(lines) = read_tail_lines(log_path, 1024 * 1024) {
             let mut bad_exit_phase = None;
             let mut specific_cause = None;
 
@@ -615,22 +597,21 @@ fn extract_error_summary(log_path: &Path, wrapper_stdout: &str, wrapper_stderr: 
                 }
 
                 // Detect specific test failure, compiler error, or packaging error
-                if specific_cause.is_none() {
-                    if trimmed.starts_with("FAIL: ")
+                if specific_cause.is_none()
+                    && (trimmed.starts_with("FAIL: ")
                         || trimmed.starts_with("FAILED: ")
                         || trimmed.contains(": fatal error: ")
                         || trimmed.contains(": error: ")
                         || (trimmed.starts_with("error: ") && !trimmed.contains("error: Bad exit status"))
                         || (trimmed.contains("make: *** [") && trimmed.contains("Error"))
                         || trimmed.contains("ninja: build stopped:")
-                        || trimmed.starts_with("CMake Error at")
+                        || trimmed.starts_with("CMake Error at"))
                     {
                         specific_cause = Some(trimmed.to_string());
                         if bad_exit_phase.is_some() {
                             break;
                         }
                     }
-                }
             }
 
             match (bad_exit_phase, specific_cause) {
@@ -640,7 +621,6 @@ fn extract_error_summary(log_path: &Path, wrapper_stdout: &str, wrapper_stderr: 
                 (None, None) => {}
             }
         }
-    }
 
     // Fall back to Mock CLI wrapper output
     let combined = format!("{}\n{}", wrapper_stdout, wrapper_stderr);
@@ -721,11 +701,11 @@ pub fn parse_source_entry(raw_src: &str) -> (String, String) {
         let fname = if !frag_name.is_empty() {
             frag_name.to_string()
         } else {
-            url.trim().split('/').last().unwrap_or(url).to_string()
+            url.trim().split('/').next_back().unwrap_or(url).to_string()
         };
         (url.trim(), fname)
     } else {
-        (trimmed, trimmed.split('/').last().unwrap_or(trimmed).to_string())
+        (trimmed, trimmed.split('/').next_back().unwrap_or(trimmed).to_string())
     };
 
     // If filename has a query string (e.g. ?foo=bar), take only the part before ?
@@ -757,8 +737,8 @@ pub fn ensure_sources_present(
         None
     };
 
-    if let Some(manifest_path) = sources_manifest {
-        if let Ok(entries) = crate::lookaside::cas::parse_sources_file(&manifest_path) {
+    if let Some(manifest_path) = sources_manifest
+        && let Ok(entries) = crate::lookaside::cas::parse_sources_file(&manifest_path) {
             for entry in entries {
                 let dest = sources_dir.join(&entry.filename);
                 if !dest.exists() {
@@ -781,7 +761,6 @@ pub fn ensure_sources_present(
                 }
             }
         }
-    }
 
     // Always check spec metadata for missing source files
     let meta = match crate::distgit::spec::parse_spec_file(spec_path) {
@@ -896,11 +875,10 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
 
     // 2. Check inside dist-git destination root (e.g. distgit_dest/pkg/pkg.spec or distgit_dest/pkg/*.spec)
     let in_distgit_dir = distgit_dest.join(entry);
-    if in_distgit_dir.is_dir() {
-        if let Some(spec) = find_spec_in_dir(&in_distgit_dir) {
+    if in_distgit_dir.is_dir()
+        && let Some(spec) = find_spec_in_dir(&in_distgit_dir) {
             return Ok(spec);
         }
-    }
 
     // Check distgit_dest/pkg.spec directly
     let in_distgit_spec = distgit_dest.join(format!("{}.spec", entry));
@@ -910,22 +888,20 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
 
     // 3. Check common relative directories (e.g. specs/pkg/pkg.spec, specs/pkg.spec, data/distgit/pkg/...)
     let specs_dir = Path::new("specs").join(entry);
-    if specs_dir.is_dir() {
-        if let Some(spec) = find_spec_in_dir(&specs_dir) {
+    if specs_dir.is_dir()
+        && let Some(spec) = find_spec_in_dir(&specs_dir) {
             return Ok(spec);
         }
-    }
     let specs_file = Path::new("specs").join(format!("{}.spec", entry));
     if specs_file.is_file() {
         return Ok(specs_file);
     }
 
     let default_distgit = Path::new("data/distgit").join(entry);
-    if default_distgit.is_dir() {
-        if let Some(spec) = find_spec_in_dir(&default_distgit) {
+    if default_distgit.is_dir()
+        && let Some(spec) = find_spec_in_dir(&default_distgit) {
             return Ok(spec);
         }
-    }
 
     // 4. Check if entry + .spec exists relative to current dir
     let local_spec = PathBuf::from(format!("{}.spec", entry));

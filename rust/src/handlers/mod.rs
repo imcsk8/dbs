@@ -160,11 +160,10 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
                 let mut found = Vec::new();
                 if let Ok(entries) = fs::read_dir(&dest) {
                     for entry in entries.flatten() {
-                        if entry.path().join(".git").exists() {
-                            if let Some(name) = entry.file_name().to_str() {
+                        if entry.path().join(".git").exists()
+                            && let Some(name) = entry.file_name().to_str() {
                                 found.push(name.to_string());
                             }
-                        }
                     }
                 }
                 found
@@ -482,11 +481,10 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
             }
-            if record_db {
-                if let Some(url) = dbs_cfg.database.url.as_ref() {
+            if record_db
+                && let Some(url) = dbs_cfg.database.url.as_ref() {
                     runner = runner.with_db_url(url.clone());
                 }
-            }
             println!(" Chroot Profile: {}", runner.root_name);
             if let Some(cfg) = &runner.config_dir {
                 println!(" Chroot Config:  {}", cfg.display());
@@ -526,12 +524,11 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
                     match res {
                         Ok(out) => {
                             print_build_output(&out);
-                            if let Some(conn) = &mut db_conn {
-                                if let Some(target) = args.targets.get(idx) {
+                            if let Some(conn) = &mut db_conn
+                                && let Some(target) = args.targets.get(idx) {
                                     let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                                     let _ = db::record_build_result(conn, name, &out);
                                 }
-                            }
                         }
                         Err(e) => eprintln!("✗ Worker build error: {}", e),
                     }
@@ -774,11 +771,10 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
         }
-        if record_db {
-            if let Some(url) = dbs_cfg.database.url.as_ref() {
+        if record_db
+            && let Some(url) = dbs_cfg.database.url.as_ref() {
                 mock_runner = mock_runner.with_db_url(url.clone());
             }
-        }
         println!(" Chroot Profile: {}", mock_runner.root_name);
         if let Some(cfg) = &mock_runner.config_dir {
             println!(" Chroot Config:  {}", cfg.display());
@@ -810,11 +806,10 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
 
             let mut targets = Vec::new();
             for pkg in &layer.packages {
-                if let Some(meta) = graph.packages.get(pkg) {
-                    if let Some(spec) = &meta.spec_path {
+                if let Some(meta) = graph.packages.get(pkg)
+                    && let Some(spec) = &meta.spec_path {
                         targets.push(spec.clone());
                     }
-                }
             }
 
             if !targets.is_empty() {
@@ -828,12 +823,11 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
                     match res {
                         Ok(out) => {
                             print_build_output(&out);
-                            if let Some(conn) = &mut db_conn {
-                                if let Some(target) = targets.get(idx) {
+                            if let Some(conn) = &mut db_conn
+                                && let Some(target) = targets.get(idx) {
                                     let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                                     let _ = db::record_build_result(conn, name, &out);
                                 }
-                            }
                         }
                         Err(e) => eprintln!("✗ Worker build error: {}", e),
                     }
@@ -1246,11 +1240,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }
-            if record_db {
-                if let Some(url) = dbs_cfg.database.url.as_ref() {
+            if record_db
+                && let Some(url) = dbs_cfg.database.url.as_ref() {
                     mock_runner = mock_runner.with_db_url(url.clone());
                 }
-            }
             let runner_arc = Arc::new(mock_runner);
 
             let mut db_conn = if record_db {
@@ -1267,17 +1260,16 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
                 let mut targets = Vec::new();
                 for pkg in &layer.packages {
-                    if let Some(meta) = graph.packages.get(pkg) {
-                        if let Some(spec) = &meta.spec_path {
+                    if let Some(meta) = graph.packages.get(pkg)
+                        && let Some(spec) = &meta.spec_path {
                             targets.push(spec.clone());
                         }
-                    }
                 }
 
                 let mut layer_targets = Vec::new();
                 for target in targets {
-                    if dbs_cfg.build.skip_existing {
-                        if let Ok(Some(existing)) = runner::gate::check_package_already_built(
+                    if dbs_cfg.build.skip_existing
+                        && let Ok(Some(existing)) = runner::gate::check_package_already_built(
                             &target,
                             Some(&dbs_cfg.distro.dest),
                             Some(&staging_dir),
@@ -1288,7 +1280,6 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                                 existing.name, existing.version, existing.release, existing.source);
                             continue;
                         }
-                    }
                     layer_targets.push(target);
                 }
 
@@ -1308,12 +1299,11 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                         match res {
                             Ok(out) => {
                                 print_build_output(&out);
-                                if let Some(conn) = &mut db_conn {
-                                    if let Some(target) = targets.get(idx) {
+                                if let Some(conn) = &mut db_conn
+                                    && let Some(target) = targets.get(idx) {
                                         let pkg_name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                                         let _ = db::record_build_result(conn, pkg_name, &out);
                                     }
-                                }
                             }
                             Err(e) => eprintln!("✗ Worker build error: {}", e),
                         }
@@ -1448,13 +1438,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
 /// Dispatches the `db` subcommand for database bootstrapping, status check, reset, and dumping schema.
 pub async fn handle_db(args: DbArgs, dbs_cfg: &DbsConfig) -> Result<()> {
-    match args.command {
-        DbCommands::DumpSchema { down } => {
-            let sql = db::bootstrap::dump_schema(down);
-            print!("{}", sql);
-            return Ok(());
-        }
-        _ => {}
+    if let DbCommands::DumpSchema { down } = args.command {
+        let sql = db::bootstrap::dump_schema(down);
+        print!("{}", sql);
+        return Ok(());
     }
 
     let db_url = args.database_url.as_deref().or(dbs_cfg.database.url.as_deref());
@@ -1543,11 +1530,10 @@ pub async fn handle_config(args: ConfigArgs, dbs_cfg: &DbsConfig, loaded_path: O
                     output.display()
                 ));
             }
-            if let Some(parent) = output.parent() {
-                if !parent.as_os_str().is_empty() {
+            if let Some(parent) = output.parent()
+                && !parent.as_os_str().is_empty() {
                     fs::create_dir_all(parent)?;
                 }
-            }
             let sample = DbsConfig::sample_toml();
             fs::write(&output, sample)?;
             println!("✓ Successfully generated DBS configuration file at: {}", output.display());

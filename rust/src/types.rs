@@ -6,7 +6,7 @@ use diesel::pg::{Pg,PgValue};
 use diesel::serialize::{IsNull,Output,ToSql};
 use std::io::Write;
 use serde::{Serialize, Deserialize};
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Display};
 use diesel::QueryId;
 use clap::ValueEnum;
 
@@ -66,12 +66,12 @@ impl From<&str> for OsType {
     }
 }
 
-/// Convert to String
-impl ToString for OsType {
-    fn to_string(&self) -> String {
+/// Convert to Display (and automatically ToString)
+impl Display for OsType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            OsType::VERSIONED => String::from("VERSIONED"),
-            OsType::ROLLING => String::from("ROLLING"),
+            OsType::VERSIONED => write!(f, "VERSIONED"),
+            OsType::ROLLING => write!(f, "ROLLING"),
         }
     }
 }
@@ -142,14 +142,14 @@ impl From<&str> for OsFormat {
     }
 }
 
-/// Convert to String
-impl ToString for OsFormat {
-    fn to_string(&self) -> String {
+/// Convert to Display (and automatically ToString)
+impl Display for OsFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            OsFormat::ISO  => String::from("ISO"),
-            OsFormat::OCI  => String::from("OCI"),
-            OsFormat::QCOW => String::from("QCOW"),
-            OsFormat::RAW  => String::from("RAW"),
+            OsFormat::ISO  => write!(f, "ISO"),
+            OsFormat::OCI  => write!(f, "OCI"),
+            OsFormat::QCOW => write!(f, "QCOW"),
+            OsFormat::RAW  => write!(f, "RAW"),
         }
     }
 }
@@ -214,14 +214,14 @@ impl From<&str> for BuildStatus {
     }
 }
 
-impl ToString for BuildStatus {
-    fn to_string(&self) -> String {
+impl Display for BuildStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            BuildStatus::PENDING  => String::from("PENDING"),
-            BuildStatus::BUILDING => String::from("BUILDING"),
-            BuildStatus::SUCCESS  => String::from("SUCCESS"),
-            BuildStatus::FAILED   => String::from("FAILED"),
-            BuildStatus::SKIPPED  => String::from("SKIPPED"),
+            BuildStatus::PENDING  => write!(f, "PENDING"),
+            BuildStatus::BUILDING => write!(f, "BUILDING"),
+            BuildStatus::SUCCESS  => write!(f, "SUCCESS"),
+            BuildStatus::FAILED   => write!(f, "FAILED"),
+            BuildStatus::SKIPPED  => write!(f, "SKIPPED"),
         }
     }
 }
