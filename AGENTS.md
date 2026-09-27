@@ -242,5 +242,6 @@ dbs pkg list
   * `make clean_db`: Runs database migrations down.
   * `make build`: Compiles debug binary.
   * `make test`: Runs all unit tests.
+  * `make lint`: Runs Clippy linter (`cargo clippy`).
   * `make release`: Compiles optimized release binary into `bin/dbs` and `rust/bin/dbs`.
   * `make clean`: Cleans generated files.
