@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use clap::Parser;
 use eyre::{eyre, Result};
+use log::debug;
 
 pub mod chroot;
 pub mod cli;
@@ -36,6 +37,8 @@ use tui::{run_explorer, run_monitor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+    debug!("Logger initialized");
     let cli = Cli::parse();
     let (dbs_cfg, loaded_path) = DbsConfig::load(cli.config.as_deref())?;
 

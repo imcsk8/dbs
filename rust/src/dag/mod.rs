@@ -11,6 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use eyre::{eyre, Result};
+use log::debug;
 
 use crate::distgit::spec::{parse_spec_file, SpecMetadata};
 
@@ -71,12 +72,14 @@ impl DependencyGraph {
 
         let mut loaded = 0;
         for entry in entries.flatten() {
+            debug!("Checking {:?}", entry);
             let path = entry.path();
             if path.is_dir() {
                 if let Ok(sub_entries) = fs::read_dir(&path) {
                     for sub in sub_entries.flatten() {
                         let sub_path = sub.path();
                         if sub_path.extension().and_then(|ext| ext.to_str()) == Some("spec") {
+                            debug!("Checking spec: {:?}", sub_path);
                             match parse_spec_file(&sub_path) {
                                 Ok(meta) => {
                                     self.add_package(meta);
@@ -87,6 +90,7 @@ impl DependencyGraph {
                         }
                     }
                 }
+            // Entry is a spec file
             } else if path.extension().and_then(|ext| ext.to_str()) == Some("spec") {
                 match parse_spec_file(&path) {
                     Ok(meta) => {
