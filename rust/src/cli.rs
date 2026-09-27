@@ -584,6 +584,22 @@ pub enum DistroCommands {
         /// Record builds and capabilities in the database (defaults to [database].record_db in dbs.toml).
         #[arg(long)]
         record_db: bool,
+
+        /// Build a specific distribution stage (e.g. bootstrap, system, desktop).
+        #[arg(long)]
+        stage: Option<String>,
+
+        /// Build all configured stages in sequential order.
+        #[arg(long)]
+        stages: bool,
+
+        /// Path to a text file containing package names or spec paths to build (one per line).
+        #[arg(short = 'p', long)]
+        packages: Option<PathBuf>,
+
+        /// Automatically detect and break circular dependencies via base chroot fallback.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+        break_cycles: bool,
     },
 
     /// Organize RPMs into standard layout, run createrepo_c, optionally GPG sign, and generate client .repo.

@@ -9,9 +9,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use eyre::{eyre, Result};
-use log::debug;
+use log::{debug, info};
 
 use crate::distgit::spec::{parse_spec_file, SpecMetadata};
 
@@ -24,6 +24,15 @@ pub struct CompilationLayer {
     pub layer_index: usize,
     /// Package names scheduled for execution in this layer.
     pub packages: Vec<String>,
+}
+
+/// Represents a directed dependency edge that was severed to break a circular dependency.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrokenCycleEdge {
+    /// Package that required the prerequisite.
+    pub consumer: String,
+    /// Prerequisite that was temporarily removed from workspace dependencies.
+    pub prerequisite: String,
 }
 
 /// Directed package dependency graph.
@@ -102,6 +111,24 @@ impl DependencyGraph {
             }
         }
 
+        self.resolve_edges();
+        Ok(loaded)
+    }
+
+    /// Loads specific package `.spec` files into the dependency graph and resolves their edges.
+    pub fn load_package_targets(&mut self, spec_paths: &[PathBuf]) -> Result<usize> {
+        let mut loaded = 0;
+        for path in spec_paths {
+            if path.is_file() {
+                match parse_spec_file(path) {
+                    Ok(meta) => {
+                        self.add_package(meta);
+                        loaded += 1;
+                    }
+                    Err(e) => eprintln!("Warning: failed to parse {}: {}", path.display(), e),
+                }
+            }
+        }
         self.resolve_edges();
         Ok(loaded)
     }
@@ -195,6 +222,18 @@ impl DependencyGraph {
         }
 
         if processed_count < self.packages.len() {
+            let cycles = self.find_cycles();
+            if !cycles.is_empty() {
+                let cycle_descriptions: Vec<String> = cycles
+                    .iter()
+                    .map(|c| format!("[{}]", c.join(" <-> ")))
+                    .collect();
+                return Err(eyre!(
+                    "Circular dependency detected! Identified cyclic loops: {}. (Use cycle-breaker or staged build to resolve automatically via base chroot fallback)",
+                    cycle_descriptions.join(", ")
+                ));
+            }
+
             let mut unresolved: Vec<String> = in_degrees
                 .into_iter()
                 .filter(|(_, deg)| *deg > 0)
@@ -209,6 +248,168 @@ impl DependencyGraph {
         }
 
         Ok(layers)
+    }
+
+    /// Finds all Strongly Connected Components (SCCs) in the graph using Tarjan's algorithm.
+    pub fn find_strongly_connected_components(&self) -> Vec<Vec<String>> {
+        struct Tarjan<'a> {
+            dependencies: &'a HashMap<String, HashSet<String>>,
+            index: usize,
+            indices: HashMap<String, usize>,
+            lowlinks: HashMap<String, usize>,
+            on_stack: HashSet<String>,
+            stack: Vec<String>,
+            sccs: Vec<Vec<String>>,
+        }
+
+        impl<'a> Tarjan<'a> {
+            fn strongconnect(&mut self, node: &str) {
+                self.indices.insert(node.to_string(), self.index);
+                self.lowlinks.insert(node.to_string(), self.index);
+                self.index += 1;
+                self.stack.push(node.to_string());
+                self.on_stack.insert(node.to_string());
+
+                if let Some(neighbors) = self.dependencies.get(node) {
+                    for neighbor in neighbors {
+                        if !self.indices.contains_key(neighbor) {
+                            self.strongconnect(neighbor);
+                            let neighbor_low = self.lowlinks[neighbor];
+                            let node_low = self.lowlinks.get_mut(node).unwrap();
+                            if neighbor_low < *node_low {
+                                *node_low = neighbor_low;
+                            }
+                        } else if self.on_stack.contains(neighbor) {
+                            let neighbor_idx = self.indices[neighbor];
+                            let node_low = self.lowlinks.get_mut(node).unwrap();
+                            if neighbor_idx < *node_low {
+                                *node_low = neighbor_idx;
+                            }
+                        }
+                    }
+                }
+
+                if self.lowlinks[node] == self.indices[node] {
+                    let mut scc = Vec::new();
+                    while let Some(w) = self.stack.pop() {
+                        self.on_stack.remove(&w);
+                        let done = w == node;
+                        scc.push(w);
+                        if done {
+                            break;
+                        }
+                    }
+                    self.sccs.push(scc);
+                }
+            }
+        }
+
+        let mut tarjan = Tarjan {
+            dependencies: &self.dependencies,
+            index: 0,
+            indices: HashMap::new(),
+            lowlinks: HashMap::new(),
+            on_stack: HashSet::new(),
+            stack: Vec::new(),
+            sccs: Vec::new(),
+        };
+
+        for node in self.packages.keys() {
+            if !tarjan.indices.contains_key(node) {
+                tarjan.strongconnect(node);
+            }
+        }
+
+        tarjan.sccs
+    }
+
+    /// Identifies all circular dependency components (SCCs with size > 1 or self-loops).
+    pub fn find_cycles(&self) -> Vec<Vec<String>> {
+        let sccs = self.find_strongly_connected_components();
+        let mut cycles = Vec::new();
+        for mut scc in sccs {
+            if scc.len() > 1 {
+                scc.sort();
+                cycles.push(scc);
+            } else if let Some(single) = scc.first()
+                && let Some(deps) = self.dependencies.get(single)
+                && deps.contains(single)
+            {
+                cycles.push(scc);
+            }
+        }
+        cycles.sort_by_key(|c| c.first().cloned().unwrap_or_default());
+        cycles
+    }
+
+    /// Iteratively detects and breaks cycles in the dependency graph using base chroot fallback.
+    ///
+    /// For each circular dependency loop, one dependency edge is severed so that
+    /// Kahn's algorithm can successfully schedule all compilation layers.
+    /// The severed dependency will be satisfied via the base buildroot/chroot upstream repository.
+    pub fn break_cycles(&mut self) -> Vec<BrokenCycleEdge> {
+        let mut broken_edges = Vec::new();
+
+        loop {
+            let cycles = self.find_cycles();
+            if cycles.is_empty() {
+                break;
+            }
+
+            let mut broke_any = false;
+            for cycle in cycles {
+                let cycle_set: HashSet<String> = cycle.into_iter().collect();
+                let mut edge_to_remove = None;
+                for consumer in &cycle_set {
+                    if let Some(deps) = self.dependencies.get(consumer) {
+                        for prereq in deps {
+                            if cycle_set.contains(prereq) {
+                                edge_to_remove = Some((consumer.clone(), prereq.clone()));
+                                break;
+                            }
+                        }
+                    }
+                    if edge_to_remove.is_some() {
+                        break;
+                    }
+                }
+
+                if let Some((consumer, prereq)) = edge_to_remove {
+                    if let Some(deps) = self.dependencies.get_mut(&consumer) {
+                        deps.remove(&prereq);
+                    }
+                    if let Some(deps) = self.dependents.get_mut(&prereq) {
+                        deps.remove(&consumer);
+                    }
+                    info!(
+                        "[Cycle Breaker] Severed cyclic edge '{} -> {}' via base chroot fallback",
+                        consumer, prereq
+                    );
+                    broken_edges.push(BrokenCycleEdge {
+                        consumer,
+                        prerequisite: prereq,
+                    });
+                    broke_any = true;
+                    break;
+                }
+            }
+
+            if !broke_any {
+                break;
+            }
+        }
+
+        broken_edges
+    }
+
+    /// Computes compilation layers with automatic circular dependency resolution.
+    ///
+    /// If circular dependencies are present, breaks them by falling back to base chroot
+    /// packages, records the severed edges, and returns the computed parallel layers.
+    pub fn compute_layers_with_cycle_breaker(&mut self) -> Result<(Vec<CompilationLayer>, Vec<BrokenCycleEdge>)> {
+        let broken = self.break_cycles();
+        let layers = self.compute_layers()?;
+        Ok((layers, broken))
     }
 }
 
@@ -306,5 +507,35 @@ mod tests {
         assert!(err_msg.contains("Circular dependency detected"));
         assert!(err_msg.contains("pkg-x"));
         assert!(err_msg.contains("pkg-y"));
+    }
+
+    #[test]
+    fn test_cycle_breaker_resolves_circular_dependencies() {
+        let mut graph = DependencyGraph::new();
+
+        let meta_x = SpecMetadata {
+            name: "pkg-x".to_string(),
+            build_requires: vec!["pkg-y".to_string()],
+            ..Default::default()
+        };
+
+        let meta_y = SpecMetadata {
+            name: "pkg-y".to_string(),
+            build_requires: vec!["pkg-x".to_string()],
+            ..Default::default()
+        };
+
+        graph.add_package(meta_x);
+        graph.add_package(meta_y);
+        graph.resolve_edges();
+
+        let (layers, broken) = graph
+            .compute_layers_with_cycle_breaker()
+            .expect("Cycle breaker should resolve cycle");
+        assert_eq!(broken.len(), 1);
+        assert_eq!(layers.len(), 2);
+        let all_packages: Vec<String> = layers.into_iter().flat_map(|l| l.packages).collect();
+        assert!(all_packages.contains(&"pkg-x".to_string()));
+        assert!(all_packages.contains(&"pkg-y".to_string()));
     }
 }

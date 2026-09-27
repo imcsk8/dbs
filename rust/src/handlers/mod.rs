@@ -1191,6 +1191,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             staging_dir,
             sign_key,
             record_db,
+            stage,
+            stages,
+            packages,
+            break_cycles,
         } => {
             let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
             let path = path.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
@@ -1211,6 +1215,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" Spec/Dist-Git Root:  {}", path.display());
             println!(" Staging Directory:   {}", staging_dir.display());
             println!(" Concurrency:         {}", concurrency);
+            println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
             println!("===========================================================");
 
             // 1. Ensure lookaside sources are synchronized
@@ -1224,18 +1229,89 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 Err(e) => eprintln!("Warning: Lookaside sync issue: {}", e),
             }
 
-            // 2. Resolve dependency graph and compute layers
-            println!("\n▶ Resolving package dependency graph (DAG)...");
-            let mut graph = DependencyGraph::new();
-            let loaded = graph.load_from_dir(&path)?;
-            if loaded == 0 {
-                return Err(eyre!("No package .spec files found in {}", path.display()));
+            // 2. Determine execution plan: Stages vs Manifest vs Full Directory
+            struct StageTask {
+                name: String,
+                spec_paths: Option<Vec<PathBuf>>,
             }
 
-            let layers = graph.compute_layers()?;
-            println!("✓ Loaded {} packages across {} compilation layers.", graph.packages.len(), layers.len());
+            let mut tasks: Vec<StageTask> = Vec::new();
 
-            // 3. Setup runner
+            if let Some(pkg_file) = packages {
+                println!("\n▶ Loading package targets from manifest file: {}", pkg_file.display());
+                let targets = runner::load_packages_from_file(&pkg_file, &path)?;
+                tasks.push(StageTask {
+                    name: format!("manifest ({})", pkg_file.display()),
+                    spec_paths: Some(targets),
+                });
+            } else if let Some(selected_stage) = stage {
+                let stage_pkgs = match dbs_cfg.distro.stages.get(&selected_stage) {
+                    Some(pkgs) => pkgs,
+                    None => return Err(eyre!(
+                        "Stage '{}' not found in configuration. Available stages: {:?}",
+                        selected_stage,
+                        dbs_cfg.distro.stages.keys().collect::<Vec<_>>()
+                    )),
+                };
+                let mut spec_paths = Vec::new();
+                for target_entry in stage_pkgs {
+                    let as_path = Path::new(target_entry);
+                    if as_path.is_file() {
+                        let sub_targets = runner::load_packages_from_file(as_path, &path)?;
+                        spec_paths.extend(sub_targets);
+                    } else {
+                        let spec = runner::resolve_package_target(target_entry, &path)?;
+                        spec_paths.push(spec);
+                    }
+                }
+                tasks.push(StageTask {
+                    name: selected_stage,
+                    spec_paths: Some(spec_paths),
+                });
+            } else if stages || !dbs_cfg.distro.stages.is_empty() {
+                let ordered_names: Vec<String> = if let Some(order) = &dbs_cfg.distro.stage_order {
+                    order.clone()
+                } else {
+                    let mut keys: Vec<String> = dbs_cfg.distro.stages.keys().cloned().collect();
+                    keys.sort();
+                    keys
+                };
+
+                for stage_name in ordered_names {
+                    if let Some(stage_pkgs) = dbs_cfg.distro.stages.get(&stage_name) {
+                        let mut spec_paths = Vec::new();
+                        for target_entry in stage_pkgs {
+                            let as_path = Path::new(target_entry);
+                            if as_path.is_file() {
+                                let sub_targets = runner::load_packages_from_file(as_path, &path)?;
+                                spec_paths.extend(sub_targets);
+                            } else {
+                                match runner::resolve_package_target(target_entry, &path) {
+                                    Ok(spec) => spec_paths.push(spec),
+                                    Err(e) => eprintln!("Warning: stage '{}' skipping unresolved target '{}': {}", stage_name, target_entry, e),
+                                }
+                            }
+                        }
+                        if !spec_paths.is_empty() {
+                            tasks.push(StageTask {
+                                name: stage_name,
+                                spec_paths: Some(spec_paths),
+                            });
+                        }
+                    }
+                }
+            } else {
+                tasks.push(StageTask {
+                    name: "full-distribution".to_string(),
+                    spec_paths: None,
+                });
+            }
+
+            if tasks.is_empty() {
+                return Err(eyre!("No package specifications or stages resolved to build."));
+            }
+
+            // 3. Setup Mock runner engine
             let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
@@ -1252,48 +1328,82 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 None
             };
 
-            // 4. Execute layered builds with dynamic repo
-            for layer in &layers {
+            // 4. Execute stages sequentially
+            let total_stages = tasks.len();
+            for (stage_idx, stage_task) in tasks.into_iter().enumerate() {
                 println!("\n===========================================================");
-                println!(" Starting Layer {} ({} package(s))", layer.layer_index, layer.packages.len());
+                println!(" Stage [{}/{}] {}", stage_idx + 1, total_stages, stage_task.name);
                 println!("===========================================================");
 
-                let mut targets = Vec::new();
-                for pkg in &layer.packages {
-                    if let Some(meta) = graph.packages.get(pkg)
-                        && let Some(spec) = &meta.spec_path {
-                            targets.push(spec.clone());
-                        }
-                }
+                let mut graph = DependencyGraph::new();
+                let loaded = if let Some(specs) = &stage_task.spec_paths {
+                    graph.load_package_targets(specs)?
+                } else {
+                    graph.load_from_dir(&path)?
+                };
 
-                let mut layer_targets = Vec::new();
-                for target in targets {
-                    if dbs_cfg.build.skip_existing
-                        && let Ok(Some(existing)) = runner::gate::check_package_already_built(
-                            &target,
-                            Some(&dbs_cfg.distro.dest),
-                            Some(&staging_dir),
-                            db_conn.as_mut(),
-                            Some(".tcrs"),
-                        ) {
-                            println!("✓ Layer package {}-{}-{} is already built ({}). Skipping.",
-                                existing.name, existing.version, existing.release, existing.source);
-                            continue;
-                        }
-                    layer_targets.push(target);
-                }
-
-                if layer_targets.is_empty() {
-                    println!("All packages in Layer {} are already built. Skipping layer.", layer.layer_index);
+                if loaded == 0 {
+                    println!("No valid package .spec files found in stage '{}'. Skipping.", stage_task.name);
                     continue;
                 }
 
-                let targets = layer_targets;
+                let (layers, broken_edges) = if break_cycles {
+                    graph.compute_layers_with_cycle_breaker()?
+                } else {
+                    let l = graph.compute_layers()?;
+                    (l, Vec::new())
+                };
 
-                let results = runner_arc
-                    .clone()
-                    .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
-                    .await;
+                if !broken_edges.is_empty() {
+                    println!("ℹ Resolved {} circular dependency edge(s) via base chroot fallback:", broken_edges.len());
+                    for b in &broken_edges {
+                        println!("  • Severed cyclic edge: '{}' -> '{}'", b.consumer, b.prerequisite);
+                    }
+                }
+                println!("✓ Scheduled {} packages across {} compilation layers.", graph.packages.len(), layers.len());
+
+                // Execute layered builds with dynamic repo
+                for layer in &layers {
+                    println!("\n-----------------------------------------------------------");
+                    println!(" Stage '{}' - Layer {} ({} package(s))", stage_task.name, layer.layer_index, layer.packages.len());
+                    println!("-----------------------------------------------------------");
+
+                    let mut targets = Vec::new();
+                    for pkg in &layer.packages {
+                        if let Some(meta) = graph.packages.get(pkg)
+                            && let Some(spec) = &meta.spec_path {
+                                targets.push(spec.clone());
+                            }
+                    }
+
+                    let mut layer_targets = Vec::new();
+                    for target in targets {
+                        if dbs_cfg.build.skip_existing
+                            && let Ok(Some(existing)) = runner::gate::check_package_already_built(
+                                &target,
+                                Some(&dbs_cfg.distro.dest),
+                                Some(&staging_dir),
+                                db_conn.as_mut(),
+                                Some(".tcrs"),
+                            ) {
+                                println!("✓ Layer package {}-{}-{} is already built ({}). Skipping.",
+                                    existing.name, existing.version, existing.release, existing.source);
+                                continue;
+                            }
+                        layer_targets.push(target);
+                    }
+
+                    if layer_targets.is_empty() {
+                        println!("All packages in Layer {} are already built. Skipping layer.", layer.layer_index);
+                        continue;
+                    }
+
+                    let targets = layer_targets;
+
+                    let results = runner_arc
+                        .clone()
+                        .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
+                        .await;
 
                     for (idx, res) in results.into_iter().enumerate() {
                         match res {
@@ -1308,10 +1418,24 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                             Err(e) => eprintln!("✗ Worker build error: {}", e),
                         }
                     }
+                }
+
+                // Automatically publish stage artifacts into distribution repository so subsequent stages have immediate access
+                println!("\n▶ Publishing stage '{}' artifacts to repository...", stage_task.name);
+                let pub_opts = DistroPublishOptions {
+                    name: name.clone(),
+                    staging_dir: staging_dir.clone(),
+                    dest_root: dest.clone(),
+                    arch: dbs_cfg.distro.arch.clone(),
+                    base_url: dbs_cfg.distro.base_url.clone(),
+                    sign_key: sign_key.clone(),
+                    workers: concurrency,
+                };
+                let _ = publish_distro(&pub_opts);
             }
 
-            // 5. Automatically publish build artifacts to distribution repo
-            println!("\n▶ Publishing build artifacts into distribution repository...");
+            // 5. Final distribution repository publication & report
+            println!("\n▶ Generating final distribution repository metadata & client configs...");
             let pub_opts = DistroPublishOptions {
                 name: name.clone(),
                 staging_dir,
@@ -1325,6 +1449,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let report = publish_distro(&pub_opts)?;
             println!("\n===========================================================");
             println!(" Distribution Build & Publication Complete!");
+            println!(" Total Stages Executed: {}", total_stages);
             println!(" Binary Repository:   {}", report.binary_repo.display());
             println!(" Total Binary RPMs:   {}", report.binary_count);
             println!(" Total Source RPMs:   {}", report.source_count);

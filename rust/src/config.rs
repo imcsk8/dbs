@@ -3,6 +3,7 @@
 //! Provides TOML configuration parsing, standard location discovery,
 //! and unified settings across database, chroot, distgit, and distro subsystems.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
@@ -219,6 +220,14 @@ pub struct DistroSettings {
     /// Repository HTTP server bind port.
     #[serde(default = "default_server_port")]
     pub server_port: u16,
+
+    /// Staged distribution build pipelines (stage name -> package targets).
+    #[serde(default)]
+    pub stages: HashMap<String, Vec<String>>,
+
+    /// Explicit execution order of stages (defaults to lexicographical sort of stage names).
+    #[serde(default)]
+    pub stage_order: Option<Vec<String>>,
 }
 
 fn default_distro_name() -> String {
@@ -263,6 +272,8 @@ impl Default for DistroSettings {
             server_name: default_server_name(),
             server_host: default_server_host(),
             server_port: default_server_port(),
+            stages: HashMap::new(),
+            stage_order: None,
         }
     }
 }

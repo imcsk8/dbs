@@ -202,6 +202,15 @@ dbs distro init tacos-stable-x86_64 --arch x86_64 --channel stable --dist tcrs
 # Execute complete distribution build (DAG resolution + lookaside staging + Mock layers)
 dbs distro build tacos-stable-x86_64 -j 4 --record-db
 
+# Build a specific distribution stage (e.g. bootstrap, system, desktop)
+dbs distro build tacos-stable-x86_64 --stage bootstrap
+
+# Build all configured stages sequentially
+dbs distro build tacos-stable-x86_64 --stages
+
+# Build from a package manifest list
+dbs distro build tacos-stable-x86_64 -p data/packages.txt
+
 # Publish repository: layout RPMs, execute createrepo_c, optionally GPG sign, generate client .repo
 dbs distro publish --name tacos-stable-x86_64
 
