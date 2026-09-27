@@ -46,6 +46,7 @@ Ensure your host system has the required build and packaging utilities installed
 * **createrepo_c**
 * **git**
 * **rpm-devel**
+* **redhat-rpm-config**
 
 ```bash
 # On Fedora / ELN / CentOS Stream:
