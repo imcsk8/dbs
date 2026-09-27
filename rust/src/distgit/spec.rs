@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use eyre::{eyre, Result};
+use log::debug;
 
 /// Extracted metadata from an RPM `.spec` file.
 #[derive(Debug, Clone, Default)]
@@ -85,8 +86,14 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
     let _ = ctx.define(&format!("_sourcedir {}", spec_dir.display()), 0);
 
     // 1. Try parsing with librpm::build::Spec for native, high-performance C parsing and expansion
-    if let Some(spec_str) = spec_path.to_str() {
-        if let Some(spec) = librpm::build::Spec::parse(spec_str, librpm::build::SpecFlags::NONE, None) {
+    let spec_str = match spec_path.to_str() {
+        Some(s) => s,
+        None => return Err(eyre!("Failed to convert spec_path to string")),
+    };
+
+    let spec = match librpm::build::Spec::parse(spec_str, librpm::build::SpecFlags::NONE, None) {
+        Some(spec) => {
+            debug!("Parsed spec: {:?}", spec);
             let hdr = spec.source_header();
             let mut meta = SpecMetadata {
                 name: hdr.name().to_string(),
@@ -182,8 +189,9 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
             }
 
             return Ok(meta);
-        }
-    }
+        },
+        None => return Err(eyre!("Failed to parse spec file: {}", spec_str)),
+    };
 
     // 2. Fallback parser if librpm::build::Spec failed to parse the file
     let mut macros: HashMap<String, String> = HashMap::new();
