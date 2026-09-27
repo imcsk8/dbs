@@ -13,6 +13,7 @@ use std::process::Command;
 use std::sync::Arc;
 use eyre::{eyre, Result};
 use tokio::sync::Semaphore;
+use log::debug;
 
 use self::cas::{compute_sha512, parse_sources_file, update_sources_manifest};
 use self::reflink::{is_btrfs, reflink_or_copy, ReflinkMode};
@@ -313,7 +314,7 @@ impl LookasideManager {
         let urls = [
             //TODO: make this configurable format!("https://repos.tacos.org.mx/sources/{}/{}", pkg_name, filename),
             format!(
-                "https://src.fedoraproject.org/repo/pkgs/{}/{}/sha512/{}/{}",
+                "https://src.fedoraproject.org/repo/pkgs/{}/{}/{}/{}",
                 pkg_name, filename, hash, filename
             ),
             /*format!(
@@ -323,7 +324,7 @@ impl LookasideManager {
         ];
 
         for url in &urls {
-            //println!("Downloading: curl -f -L -s -S --connect-timeout 10 -o {:?} {}", dest, url);
+            debug!("Downloading: curl -f -L -s -S --connect-timeout 10 -o {:?} {}", dest, url);
             let status = Command::new("curl")
                 .arg("-f")
                 .arg("-L")
