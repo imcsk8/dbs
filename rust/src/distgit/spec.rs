@@ -91,7 +91,7 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
         None => return Err(eyre!("Failed to convert spec_path to string")),
     };
 
-    let spec = match librpm::build::Spec::parse(spec_str, librpm::build::SpecFlags::NONE, None) {
+    match librpm::build::Spec::parse(spec_str, librpm::build::SpecFlags::NONE, None) {
         Some(spec) => {
             debug!("Parsed spec: {:?}", spec);
             let hdr = spec.source_header();
@@ -192,135 +192,6 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
         },
         None => return Err(eyre!("Failed to parse spec file: {}", spec_str)),
     };
-
-    // 2. Fallback parser if librpm::build::Spec failed to parse the file
-    let mut macros: HashMap<String, String> = HashMap::new();
-    macros.insert("nil".to_string(), String::new());
-    macros.insert("?dist".to_string(), String::new());
-    macros.insert("dist".to_string(), String::new());
-    macros.insert("_arch".to_string(), "x86_64".to_string());
-
-    let raw_content = match fs::read_to_string(spec_path) {
-        Ok(c) => c,
-        Err(e) => return Err(eyre!("Failed to read spec file {}: {}", spec_path.display(), e)),
-    };
-
-    let mut meta = SpecMetadata::default();
-
-    for line in raw_content.lines() {
-        let trimmed = line.trim();
-
-        // Skip comments and empty lines
-        if trimmed.starts_with('#') || trimmed.is_empty() {
-            continue;
-        }
-
-        // Check for %global or %define
-        if trimmed.starts_with("%global") || trimmed.starts_with("%define") {
-            let parts: Vec<&str> = trimmed.split_whitespace().collect();
-            if parts.len() >= 3 {
-                let k = parts[1].split('(').next().unwrap_or(parts[1]).trim();
-                let after_directive = trimmed[parts[0].len()..].trim_start();
-                let v = after_directive[parts[1].len()..].trim();
-                let expanded_v = expand_macros(v, &macros);
-                macros.insert(k.to_string(), expanded_v);
-            } else if parts.len() == 2 {
-                let k = parts[1].split('(').next().unwrap_or(parts[1]).trim();
-                macros.insert(k.to_string(), String::new());
-            }
-            continue;
-        }
-
-        // Stop processing preamble when body sections begin
-        if trimmed.starts_with("%description") || trimmed.starts_with("%prep") || trimmed.starts_with("%build") {
-            break;
-        }
-
-        // Split key: value
-        if let Some((key, val)) = trimmed.split_once(':') {
-            let tag = key.trim().to_lowercase();
-            let value = val.trim().to_string();
-
-            match tag.as_str() {
-                "name" if meta.name.is_empty() => {
-                    meta.name = expand_macros(&value, &macros);
-                    macros.insert("name".to_string(), meta.name.clone());
-                }
-                "version" if meta.version.is_empty() => {
-                    meta.version = expand_macros(&value, &macros);
-                    macros.insert("version".to_string(), meta.version.clone());
-                }
-                "release" if meta.release.is_empty() => {
-                    meta.release = expand_macros(&value, &macros);
-                    macros.insert("release".to_string(), meta.release.clone());
-                }
-                "epoch" => {
-                    if let Ok(ep) = value.parse::<i32>() {
-                        meta.epoch = ep;
-                    }
-                    macros.insert("epoch".to_string(), value);
-                }
-                "summary" if meta.summary.is_empty() => {
-                    meta.summary = expand_macros(&value, &macros);
-                    macros.insert("summary".to_string(), meta.summary.clone());
-                }
-                "license" if meta.license.is_empty() => {
-                    meta.license = expand_macros(&value, &macros);
-                    macros.insert("license".to_string(), meta.license.clone());
-                }
-                "url" if meta.url.is_empty() => {
-                    meta.url = expand_macros(&value, &macros);
-                    macros.insert("url".to_string(), meta.url.clone());
-                }
-                "buildrequires" => {
-                    for req in value.split([',', ' ']) {
-                        let cleaned = req.trim();
-                        if !cleaned.is_empty() && !cleaned.starts_with('>') && !cleaned.starts_with('=') && !cleaned.starts_with('<') {
-                            meta.build_requires.push(expand_macros(cleaned, &macros));
-                        }
-                    }
-                }
-                "requires" => {
-                    for req in value.split([',', ' ']) {
-                        let cleaned = req.trim();
-                        if !cleaned.is_empty() && !cleaned.starts_with('>') && !cleaned.starts_with('=') && !cleaned.starts_with('<') {
-                            meta.requires.push(expand_macros(cleaned, &macros));
-                        }
-                    }
-                }
-                "provides" => {
-                    for prov in value.split([',', ' ']) {
-                        let cleaned = prov.trim();
-                        if !cleaned.is_empty() && !cleaned.starts_with('>') && !cleaned.starts_with('=') && !cleaned.starts_with('<') {
-                            meta.provides.push(expand_macros(cleaned, &macros));
-                        }
-                    }
-                }
-                k if k.starts_with("source") => {
-                    if !value.is_empty() {
-                        meta.sources.push(value);
-                    }
-                }
-                k if k.starts_with("patch") => {
-                    if !value.is_empty() {
-                        meta.patches.push(value);
-                    }
-                }
-                _ => (),
-            }
-        }
-    }
-
-    for src in &mut meta.sources {
-        *src = expand_macros(src, &macros);
-    }
-    for patch in &mut meta.patches {
-        *patch = expand_macros(patch, &macros);
-    }
-
-    meta.url = expand_macros(&meta.url, &macros);
-    meta.spec_path = Some(spec_path.to_path_buf());
-    Ok(meta)
 }
 
 #[cfg(test)]
