@@ -83,7 +83,6 @@ stage_order = ["bootstrap", "system", "utilities", "desktop"]
 bootstrap = [
     "filesystem",
     "setup",
-    "basesystem",
     "glibc",
     "binutils",
     "gcc",

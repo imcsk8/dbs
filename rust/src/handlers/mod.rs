@@ -1218,18 +1218,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
             println!("===========================================================");
 
-            // 1. Ensure lookaside sources are synchronized
-            let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
-            println!("\n▶ Synchronizing source archives into lookaside cache ({})...", lookaside_mgr.root.display());
-            match lookaside_mgr.sync_dir(&path, concurrency).await {
-                Ok(rep) => {
-                    println!("✓ Lookaside sources: {} cached, {} downloaded, {} failed (total: {})",
-                        rep.already_cached, rep.downloaded, rep.failed, rep.total_sources_found);
-                }
-                Err(e) => eprintln!("Warning: Lookaside sync issue: {}", e),
-            }
-
-            // 2. Determine execution plan: Stages vs Manifest vs Full Directory
+            // 1. Determine execution plan: Stages vs Manifest vs Full Directory
             struct StageTask {
                 name: String,
                 spec_paths: Option<Vec<PathBuf>>,
@@ -1260,8 +1249,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                         let sub_targets = runner::load_packages_from_file(as_path, &path)?;
                         spec_paths.extend(sub_targets);
                     } else {
-                        let spec = runner::resolve_package_target(target_entry, &path)?;
-                        spec_paths.push(spec);
+                        match runner::resolve_package_target(target_entry, &path) {
+                            Ok(spec) => spec_paths.push(spec),
+                            Err(e) => eprintln!("Warning: stage '{}' skipping unresolved target '{}': {}", selected_stage, target_entry, e),
+                        }
                     }
                 }
                 tasks.push(StageTask {
@@ -1305,6 +1296,24 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                     name: "full-distribution".to_string(),
                     spec_paths: None,
                 });
+            }
+
+            if tasks.is_empty() {
+                return Err(eyre!("No package specifications or stages resolved to build."));
+            }
+
+            // 2. Ensure lookaside sources are synchronized for full-distribution builds if needed
+            let is_full_dist = tasks.iter().any(|t| t.spec_paths.is_none());
+            if is_full_dist {
+                let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
+                println!("\n▶ Synchronizing source archives into lookaside cache ({})...", lookaside_mgr.root.display());
+                match lookaside_mgr.sync_dir(&path, concurrency).await {
+                    Ok(rep) => {
+                        println!("✓ Lookaside sources: {} cached, {} downloaded, {} failed (total: {})",
+                            rep.already_cached, rep.downloaded, rep.failed, rep.total_sources_found);
+                    }
+                    Err(e) => eprintln!("Warning: Lookaside sync issue: {}", e),
+                }
             }
 
             if tasks.is_empty() {
