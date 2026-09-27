@@ -75,6 +75,56 @@ server_name = "repos.tacos.org.mx"
 server_host = "0.0.0.0"
 server_port = 8080
 
+# Explicit execution order for distribution build stages
+stage_order = ["bootstrap", "system", "utilities", "desktop"]
+
+[distro.stages]
+# Stage 1: Minimal toolchain and core base packages
+bootstrap = [
+    "filesystem",
+    "setup",
+    "basesystem",
+    "glibc",
+    "binutils",
+    "gcc",
+    "bash",
+    "coreutils",
+    "rpm",
+    "dnf5",
+    "make",
+]
+
+# Stage 2: Core system runtime and administration
+system = [
+    "systemd",
+    "util-linux",
+    "shadow-utils",
+    "pam",
+    "openssl",
+    "audit",
+    "kmod",
+    "iproute",
+]
+
+# Stage 3: Base utilities, networking, and server administration
+utilities = [
+    "curl",
+    "git",
+    "zstd",
+    "tar",
+    "tmux",
+    "vim",
+    "cockpit",
+]
+
+# Stage 4: Graphical stack and desktop environment
+desktop = [
+    "mesa",
+    "wayland",
+    "mutter",
+    "gnome-shell",
+]
+
 [build]
 # Skip compiling packages if the exact version/release is already built (override with --force)
 skip_existing = true
