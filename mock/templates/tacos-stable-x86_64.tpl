@@ -9,9 +9,9 @@ config_opts['description'] = 'Custom Distribution Chroot for tacos-stable-x86_64
 
 config_opts['macros']['%dist'] = '.tcrs'
 config_opts['macros']['%vendor'] = 'tacos-stable-x86_64'
-config_opts['macros']['%_smp_mflags'] = '-j2'
-config_opts['macros']['%_smp_build_ncpus'] = '2'
-config_opts['macros']['%_smp_ncpus_max'] = '2'
+config_opts['macros']['%_smp_mflags'] = '-j24'
+config_opts['macros']['%_smp_build_ncpus'] = '24'
+config_opts['macros']['%_smp_ncpus_max'] = '24'
 
 config_opts['dnf.conf'] = """
 [main]

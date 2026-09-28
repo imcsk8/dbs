@@ -14,9 +14,9 @@ config_opts['channel'] = 'stable'
 config_opts['macros']['%dist'] = '.tcrs'
 config_opts['macros']['%tacos'] = '1'
 config_opts['macros']['%vendor'] = 'TacOS'
-config_opts['macros']['%_smp_mflags'] = '-j2'
-config_opts['macros']['%_smp_build_ncpus'] = '2'
-config_opts['macros']['%_smp_ncpus_max'] = '2'
+config_opts['macros']['%_smp_mflags'] = '-j24'
+config_opts['macros']['%_smp_build_ncpus'] = '24'
+config_opts['macros']['%_smp_ncpus_max'] = '24'
 
 # https://fedoraproject.org/wiki/Changes/BuildWithDNF5
 config_opts['package_manager'] = 'dnf5'

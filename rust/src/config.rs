@@ -104,7 +104,10 @@ fn default_arch() -> String {
 }
 
 fn default_smp_cpus() -> usize {
-    2
+    match std::thread::available_parallelism() {
+        Ok(n) => n.get(),
+        Err(_) => 24,
+    }
 }
 
 impl Default for ChrootConfig {
@@ -357,7 +360,7 @@ search_paths = [
 arch = "x86_64"
 
 # Max SMP CPUs passed to Mock chroot (%_smp_build_ncpus)
-smp_cpus = 2
+smp_cpus = 24
 
 [distgit]
 # Default upstream distribution preset (e.g. fedora-rawhide, centos-stream-10, tacos)

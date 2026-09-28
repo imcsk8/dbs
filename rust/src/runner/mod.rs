@@ -58,6 +58,8 @@ pub struct MockRunner {
     pub lookaside_dir: Option<PathBuf>,
     /// Optional database connection URL to record build lifecycle states.
     pub db_url: Option<String>,
+    /// Optional number of SMP compilation threads passed to Mock (%_smp_mflags, %_smp_build_ncpus).
+    pub smp_cpus: Option<usize>,
 }
 
 impl MockRunner {
@@ -70,6 +72,7 @@ impl MockRunner {
             local_repo_dir: None,
             lookaside_dir: None,
             db_url: None,
+            smp_cpus: None,
         }
     }
 
@@ -110,6 +113,12 @@ impl MockRunner {
     /// Sets database URL for recording build lifecycle events.
     pub fn with_db_url(mut self, db_url: impl Into<String>) -> Self {
         self.db_url = Some(db_url.into());
+        self
+    }
+
+    /// Sets the number of SMP compilation threads passed to Mock inside the chroot.
+    pub fn with_smp_cpus(mut self, smp_cpus: usize) -> Self {
+        self.smp_cpus = Some(smp_cpus);
         self
     }
 
@@ -159,6 +168,12 @@ impl MockRunner {
 
             if let Some(cfg) = &self.config_dir {
                 srpm_cmd.arg(format!("--configdir={}", cfg.display()));
+            }
+
+            if let Some(smp) = self.smp_cpus {
+                srpm_cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
+                srpm_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
+                srpm_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
             }
 
             srpm_cmd.arg("--buildsrpm");
@@ -238,6 +253,12 @@ impl MockRunner {
                 let abs_repo = fs::canonicalize(repo).unwrap_or_else(|_| repo.clone());
                 rebuild_cmd.arg(format!("--addrepo=file://{}", abs_repo.display()));
             }
+
+        if let Some(smp) = self.smp_cpus {
+            rebuild_cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
+            rebuild_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
+            rebuild_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
+        }
 
         rebuild_cmd.arg("--rebuild").arg(&target_srpm);
 
@@ -333,6 +354,11 @@ impl MockRunner {
                 if let Some(cfg) = &self.config_dir {
                     srpm_cmd.arg(format!("--configdir={}", cfg.display()));
                 }
+                if let Some(smp) = self.smp_cpus {
+                    srpm_cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
+                    srpm_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
+                    srpm_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
+                }
                 srpm_cmd.arg("--buildsrpm");
                 srpm_cmd.arg("--spec").arg(target);
                 srpm_cmd.arg(format!("--sources={}", sources_dir.display()));
@@ -358,6 +384,12 @@ impl MockRunner {
 
         if let Some(cfg) = &self.config_dir {
             cmd.arg(format!("--configdir={}", cfg.display()));
+        }
+
+        if let Some(smp) = self.smp_cpus {
+            cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
+            cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
+            cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
         }
 
         for srpm in &srpms {

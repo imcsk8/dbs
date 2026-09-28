@@ -50,6 +50,8 @@ pub struct ChrootConfig {
     pub valid: bool,
     /// Description of missing templates or validation errors.
     pub validation_error: Option<String>,
+    /// Configured SMP build CPUs macro tag (`%_smp_build_ncpus`).
+    pub smp_cpus: Option<usize>,
 }
 
 /// Diagnostic report generated when validating a chroot configuration.
@@ -299,6 +301,7 @@ impl ChrootResolver {
                     includes: Vec::new(),
                     valid: false,
                     validation_error: Some(format!("Failed to read file: {}", e)),
+                    smp_cpus: None,
                 };
             }
         };
@@ -310,6 +313,7 @@ impl ChrootResolver {
         let mut vendor = extract_macro_val(&content, "%vendor");
         let mut bootstrap_image = extract_config_val(&content, "bootstrap_image");
         let mut description = extract_config_val(&content, "description");
+        let mut smp_cpus = extract_macro_val(&content, "%_smp_build_ncpus").and_then(|v| v.parse::<usize>().ok());
 
         let includes = extract_includes(&content);
         let mut valid = true;
@@ -350,6 +354,9 @@ impl ChrootResolver {
                 if description.is_none() {
                     description = extract_config_val(&tpl_content, "description");
                 }
+                if smp_cpus.is_none() {
+                    smp_cpus = extract_macro_val(&tpl_content, "%_smp_build_ncpus").and_then(|v| v.parse::<usize>().ok());
+                }
             }
         }
 
@@ -367,6 +374,7 @@ impl ChrootResolver {
             includes,
             valid,
             validation_error,
+            smp_cpus,
         }
     }
 
@@ -472,7 +480,18 @@ impl ChrootResolver {
     }
 
     /// Initializes a starter template for a new distribution chroot.
-    pub fn init(name: &str, target_arch: &str, dest_dir: &Path) -> Result<PathBuf> {
+    pub fn init(
+        name: &str,
+        target_arch: &str,
+        dest_dir: &Path,
+        smp_cpus: Option<usize>,
+    ) -> Result<PathBuf> {
+        let smp = smp_cpus.unwrap_or_else(|| {
+            match std::thread::available_parallelism() {
+                Ok(n) => n.get(),
+                Err(_) => 24,
+            }
+        });
         fs::create_dir_all(dest_dir)?;
         let templates_dir = dest_dir.join("templates");
         fs::create_dir_all(&templates_dir)?;
@@ -499,9 +518,9 @@ config_opts['description'] = 'Custom Distribution Chroot for {name}'
 
 config_opts['macros']['%dist'] = '.custom'
 config_opts['macros']['%vendor'] = '{name}'
-config_opts['macros']['%_smp_mflags'] = '-j2'
-config_opts['macros']['%_smp_build_ncpus'] = '2'
-config_opts['macros']['%_smp_ncpus_max'] = '2'
+config_opts['macros']['%_smp_mflags'] = '-j{smp}'
+config_opts['macros']['%_smp_build_ncpus'] = '{smp}'
+config_opts['macros']['%_smp_ncpus_max'] = '{smp}'
 
 config_opts['dnf.conf'] = """
 [main]
@@ -673,7 +692,7 @@ include('templates/tacos-rolling.tpl')
         let temp_dir = std::env::temp_dir().join("dbs_chroot_test");
         let _ = fs::remove_dir_all(&temp_dir);
 
-        let created_cfg = ChrootResolver::init("my-distro", "aarch64", &temp_dir)
+        let created_cfg = ChrootResolver::init("my-distro", "aarch64", &temp_dir, Some(8))
             .expect("Failed to initialize test chroot");
         assert!(created_cfg.is_file());
 
@@ -681,6 +700,7 @@ include('templates/tacos-rolling.tpl')
         assert_eq!(parsed.name, "my-distro");
         assert_eq!(parsed.target_arch, Some("aarch64".to_string()));
         assert_eq!(parsed.package_manager, Some("dnf5".to_string()));
+        assert_eq!(parsed.smp_cpus, Some(8));
         assert!(parsed.valid);
 
         let _ = fs::remove_dir_all(&temp_dir);

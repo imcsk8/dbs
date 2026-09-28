@@ -478,6 +478,16 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
         "mock" => {
             let chroot_spec = mock_root.unwrap_or_else(|| "tacos-rolling-x86_64".to_string());
             let mut runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
+            let smp_effective = args.smp.or_else(|| {
+                if args.targets.len() == 1 && args.concurrency.is_some() {
+                    args.concurrency
+                } else {
+                    Some(dbs_cfg.chroot.smp_cpus)
+                }
+            });
+            if let Some(smp) = smp_effective {
+                runner = runner.with_smp_cpus(smp);
+            }
             if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
             }
@@ -491,6 +501,9 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
             if let Some(ld) = &runner.lookaside_dir {
                 println!(" Lookaside Dir:  {}", ld.display());
+            }
+            if let Some(smp) = runner.smp_cpus {
+                println!(" SMP Concurrency: {} cores (-j{})", smp, smp);
             }
 
             if args.chain {
@@ -775,6 +788,7 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         println!("\nExecuting layered build orchestration with runner '{}'...", args.runner);
         let chroot_spec = mock_root.unwrap_or_else(|| "tacos-rolling-x86_64".to_string());
         let mut mock_runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
+        mock_runner = mock_runner.with_smp_cpus(dbs_cfg.chroot.smp_cpus);
         if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
         }
@@ -788,6 +802,9 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         }
         if let Some(ld) = &mock_runner.lookaside_dir {
             println!(" Lookaside Dir:  {}", ld.display());
+        }
+        if let Some(smp) = mock_runner.smp_cpus {
+            println!(" SMP Concurrency: {} cores (-j{})", smp, smp);
         }
         let runner_arc = Arc::new(mock_runner);
 
@@ -923,6 +940,7 @@ pub async fn handle_chroot(args: ChrootArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 println!("    * {} [{}] ({})", inc, exists, full.display());
             }
             println!("  Status:           {}", if config.valid { "✓ Valid and complete" } else { "✗ Invalid" });
+            println!("  SMP Concurrency:  {}", config.smp_cpus.map(|c| format!("{} cores (-j{})", c, c)).unwrap_or_else(|| "unspecified (dynamic)".to_string()));
             if let Some(err) = &config.validation_error {
                 println!("  Validation Error: {}", err);
             }
@@ -944,6 +962,7 @@ pub async fn handle_chroot(args: ChrootArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!("  Config File:      {}", report.config.path.display());
             println!("  Architecture:     {}", report.config.target_arch.as_deref().unwrap_or("unknown"));
             println!("  Package Manager:  {}", report.config.package_manager.as_deref().unwrap_or("unknown"));
+            println!("  SMP Concurrency:  {}", report.config.smp_cpus.map(|c| format!("{} cores (-j{})", c, c)).unwrap_or_else(|| "unspecified (dynamic)".to_string()));
             println!("  Templates Valid:  {}", if report.config.valid { "✓ All includes found" } else { "✗ Missing template" });
 
             if report.mock_verified {
@@ -984,9 +1003,9 @@ pub async fn handle_chroot(args: ChrootArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             }
         }
 
-        ChrootCommands::Init { name, arch, dest } => {
+        ChrootCommands::Init { name, arch, dest, smp_cpus } => {
             println!("Initializing new Mock chroot configuration '{}' (arch: {}) in {}...", name, arch, dest.display());
-            let created_path = match chroot::ChrootResolver::init(&name, &arch, &dest) {
+            let created_path = match chroot::ChrootResolver::init(&name, &arch, &dest, smp_cpus) {
                 Ok(p) => p,
                 Err(e) => return Err(eyre!("Failed to initialize chroot '{}': {}", name, e)),
             };
@@ -1151,6 +1170,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             dist,
             dest,
             mock_dir,
+            smp_cpus: _,
         } => {
             let dest = dest.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
             let mock_dir = mock_dir
@@ -1195,6 +1215,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             dest,
             lookaside_dir,
             concurrency,
+            smp,
             staging_dir,
             sign_key,
             record_db,
@@ -1212,6 +1233,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let dest = dest.unwrap_or_else(|| dbs_cfg.distro.dest.clone());
             let lookaside_dir = lookaside_dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
             let concurrency = concurrency.unwrap_or(dbs_cfg.distro.workers);
+            let smp = smp.unwrap_or(dbs_cfg.chroot.smp_cpus);
             let staging_dir = staging_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
             let sign_key = sign_key.or_else(|| dbs_cfg.distro.sign_key.clone());
             let record_db = record_db || dbs_cfg.database.record_db;
@@ -1222,6 +1244,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" Spec/Dist-Git Root:  {}", path.display());
             println!(" Staging Directory:   {}", staging_dir.display());
             println!(" Concurrency:         {}", concurrency);
+            println!(" SMP Concurrency:     {} cores (-j{})", smp, smp);
             println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
             println!("===========================================================");
 
@@ -1329,6 +1352,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
             // 3. Setup Mock runner engine
             let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
+            mock_runner = mock_runner.with_smp_cpus(smp);
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }

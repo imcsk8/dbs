@@ -244,6 +244,10 @@ pub struct BuildArgs {
     #[arg(short = 'j', long)]
     pub concurrency: Option<usize>,
 
+    /// Max SMP concurrency CPUs for package compilation inside Mock (%_smp_mflags / %_smp_build_ncpus).
+    #[arg(long, env = "DBS_SMP_CPUS")]
+    pub smp: Option<usize>,
+
     /// Dynamically feed staged RPMs back to Mock workers via a local repository.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub dynamic_repo: bool,
@@ -411,6 +415,10 @@ pub enum ChrootCommands {
         /// Destination directory (defaults to ./mock).
         #[arg(short = 'o', long, default_value = "mock")]
         dest: PathBuf,
+
+        /// Max SMP concurrency CPUs for package compilation inside Mock chroot.
+        #[arg(long)]
+        smp_cpus: Option<usize>,
     },
 }
 
@@ -542,6 +550,10 @@ pub enum DistroCommands {
         /// Directory to store Mock chroot configuration files.
         #[arg(short, long)]
         mock_dir: Option<PathBuf>,
+
+        /// Max SMP concurrency CPUs for package compilation inside Mock chroot.
+        #[arg(long)]
+        smp_cpus: Option<usize>,
     },
 
     /// Build a complete distribution: DAG resolution, lookaside source staging, and layered builds.
@@ -572,6 +584,10 @@ pub enum DistroCommands {
         /// Build worker concurrency (defaults to [distro].workers in dbs.toml).
         #[arg(short = 'j', long)]
         concurrency: Option<usize>,
+
+        /// Max SMP concurrency CPUs for package compilation inside Mock (%_smp_mflags / %_smp_build_ncpus).
+        #[arg(long, env = "DBS_SMP_CPUS")]
+        smp: Option<usize>,
 
         /// Staging directory for temporary worker builds (defaults to [distro].staging_dir in dbs.toml).
         #[arg(long)]
