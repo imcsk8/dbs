@@ -1771,33 +1771,40 @@ fn discover_package_chroot(
             }
         }
 
-    // 2. Scan /var/lib/mock for matching chroot and BUILD subdirectory
-    let mock_base = Path::new("/var/lib/mock");
-    if mock_base.exists()
-        && let Ok(entries) = fs::read_dir(mock_base) {
-            let uext_tag = detected_uniqueext.as_deref().unwrap_or("");
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                // Match root_profile and optional uniqueext
-                if name.contains(root_profile) && (uext_tag.is_empty() || name.ends_with(uext_tag)) {
-                    let build_dir = entry.path().join("root/builddir/build/BUILD");
-                    if build_dir.exists()
-                        && let Ok(sub_entries) = fs::read_dir(&build_dir) {
-                            for sub in sub_entries.flatten() {
-                                let sub_name = sub.file_name().to_string_lossy().to_string();
-                                if sub_name.starts_with(pkg_name) {
-                                    detected_cwd = Some(format!("/builddir/build/BUILD/{}", sub_name));
-                                    break;
+    // 2. Scan mock basedirs (/srv/dbs/mock, /var/lib/mock) for matching chroot and BUILD subdirectory
+    let mock_search_bases = [Path::new("/srv/dbs/mock"), Path::new("/var/lib/mock")];
+    for mock_base in &mock_search_bases {
+        if mock_base.exists()
+            && let Ok(entries) = fs::read_dir(mock_base) {
+                let uext_tag = detected_uniqueext.as_deref().unwrap_or("");
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    // Match root_profile and optional uniqueext
+                    if name.contains(root_profile) && (uext_tag.is_empty() || name.ends_with(uext_tag)) {
+                        let build_dir = entry.path().join("root/builddir/build/BUILD");
+                        if build_dir.exists()
+                            && let Ok(sub_entries) = fs::read_dir(&build_dir) {
+                                for sub in sub_entries.flatten() {
+                                    let sub_name = sub.file_name().to_string_lossy().to_string();
+                                    if sub_name.starts_with(pkg_name) {
+                                        detected_cwd = Some(format!("/builddir/build/BUILD/{}", sub_name));
+                                        break;
+                                    }
+                                }
+                                if detected_cwd.is_none() {
+                                    detected_cwd = Some("/builddir/build/BUILD".to_string());
                                 }
                             }
-                            if detected_cwd.is_none() {
-                                detected_cwd = Some("/builddir/build/BUILD".to_string());
-                            }
+                        if detected_cwd.is_some() {
+                            break;
                         }
-                    break;
+                    }
                 }
             }
+        if detected_cwd.is_some() {
+            break;
         }
+    }
 
     (detected_uniqueext, detected_cwd)
 }

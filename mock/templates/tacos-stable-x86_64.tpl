@@ -35,10 +35,12 @@ gpgcheck=0
 enabled=1
 """
 
-# Build isolation and execution tuning
-config_opts['plugin_conf']['tmpfs_enable'] = True
-config_opts['plugin_conf']['tmpfs_opts']['required_ram_mb'] = 4096
-config_opts['plugin_conf']['tmpfs_opts']['keep_mounted'] = False
+# Build isolation and execution tuning: disable tmpfs to avoid disk-full errors on massive packages (GCC, LLVM, etc.)
+config_opts['plugin_conf']['tmpfs_enable'] = False
+
+import os
+if os.path.exists('/srv/dbs/mock'):
+    config_opts['basedir'] = '/srv/dbs/mock'
 
 # Grant capabilities and relax seccomp for low-level system testing (ptrace, sched, vmsplice)
 config_opts['seccomp'] = False
