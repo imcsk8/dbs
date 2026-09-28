@@ -155,11 +155,12 @@ struct TickMsg(MonitorSnapshot);
 pub struct MonitorModel {
     dbs_cfg: DbsConfig,
     distro_name: String,
-    snapshot: MonitorSnapshot,
-    active_tab: usize,
-    status_message: Option<String>,
-    width: usize,
-    height: usize,
+    pub snapshot: MonitorSnapshot,
+    pub active_tab: usize,
+    pub scroll_offset: usize,
+    pub status_message: Option<String>,
+    pub width: usize,
+    pub height: usize,
 }
 
 impl MonitorModel {
@@ -170,10 +171,33 @@ impl MonitorModel {
             distro_name,
             snapshot,
             active_tab: 0,
+            scroll_offset: 0,
             status_message: None,
             width: 100,
             height: 30,
         }
+    }
+
+    /// Available viewport height for rendering tab body content.
+    pub fn visible_body_height(&self) -> usize {
+        self.height.saturating_sub(8).max(5)
+    }
+
+    /// Computes the maximum scroll offset for the currently active tab.
+    pub fn get_max_scroll_offset(&self) -> usize {
+        let width = self.width.max(60);
+        let body = match self.active_tab {
+            0 => self.render_overview(width),
+            1 => self.render_builds_tab(width),
+            2 => self.render_distro_tab(width),
+            3 => self.render_lookaside_tab(width),
+            4 => self.render_chroots_tab(width),
+            5 => self.render_db_tab(width),
+            _ => return 0,
+        };
+        let total_lines = body.lines().count();
+        let visible = self.visible_body_height();
+        total_lines.saturating_sub(visible)
     }
 
     fn tick_cmd(cfg: DbsConfig, distro_name: String) -> Cmd {
@@ -204,6 +228,10 @@ impl Model for MonitorModel {
         if let Some(size) = msg.downcast_ref::<WindowSizeMsg>() {
             self.width = (size.width as usize).max(40);
             self.height = (size.height as usize).max(15);
+            let max_offset = self.get_max_scroll_offset();
+            if self.scroll_offset > max_offset {
+                self.scroll_offset = max_offset;
+            }
             return None;
         }
 
@@ -218,26 +246,114 @@ impl Model for MonitorModel {
             return None;
         }
 
+        if let Some(mouse) = msg.downcast_ref::<bubbletea::MouseMsg>() {
+            match mouse.button {
+                bubbletea::MouseButton::WheelUp => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(2);
+                    return None;
+                }
+                bubbletea::MouseButton::WheelDown => {
+                    let max_offset = self.get_max_scroll_offset();
+                    self.scroll_offset = (self.scroll_offset + 2).min(max_offset);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         if let Some(key) = msg.downcast_ref::<KeyMsg>() {
             match key.key_type {
                 KeyType::CtrlC | KeyType::Esc => return Some(quit()),
                 KeyType::Tab => {
                     self.active_tab = (self.active_tab + 1) % 6;
+                    self.scroll_offset = 0;
                 }
                 KeyType::ShiftTab => {
                     self.active_tab = (self.active_tab + 5) % 6;
+                    self.scroll_offset = 0;
+                }
+                KeyType::Up => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                }
+                KeyType::Down => {
+                    let max_offset = self.get_max_scroll_offset();
+                    if self.scroll_offset < max_offset {
+                        self.scroll_offset += 1;
+                    }
+                }
+                KeyType::PgUp => {
+                    let page = self.visible_body_height().max(1);
+                    self.scroll_offset = self.scroll_offset.saturating_sub(page);
+                }
+                KeyType::PgDown => {
+                    let page = self.visible_body_height().max(1);
+                    let max_offset = self.get_max_scroll_offset();
+                    self.scroll_offset = (self.scroll_offset + page).min(max_offset);
+                }
+                KeyType::Home => {
+                    self.scroll_offset = 0;
+                }
+                KeyType::End => {
+                    self.scroll_offset = self.get_max_scroll_offset();
                 }
                 KeyType::Runes => {
                     if let Some(&ch) = key.runes.first() {
                         match ch {
                             'q' | 'Q' => return Some(quit()),
                             'r' | 'R' => return self.trigger_refresh(),
-                            '1' => self.active_tab = 0,
-                            '2' => self.active_tab = 1,
-                            '3' => self.active_tab = 2,
-                            '4' => self.active_tab = 3,
-                            '5' => self.active_tab = 4,
-                            '6' => self.active_tab = 5,
+                            'k' | 'K' => {
+                                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                            }
+                            'j' | 'J' => {
+                                let max_offset = self.get_max_scroll_offset();
+                                if self.scroll_offset < max_offset {
+                                    self.scroll_offset += 1;
+                                }
+                            }
+                            'u' | 'U' => {
+                                let half_page = (self.visible_body_height() / 2).max(1);
+                                self.scroll_offset = self.scroll_offset.saturating_sub(half_page);
+                            }
+                            'd' | 'D' => {
+                                let half_page = (self.visible_body_height() / 2).max(1);
+                                let max_offset = self.get_max_scroll_offset();
+                                self.scroll_offset = (self.scroll_offset + half_page).min(max_offset);
+                            }
+                            'g' => {
+                                self.scroll_offset = 0;
+                            }
+                            'G' => {
+                                self.scroll_offset = self.get_max_scroll_offset();
+                            }
+                            ' ' => {
+                                let page = self.visible_body_height().max(1);
+                                let max_offset = self.get_max_scroll_offset();
+                                self.scroll_offset = (self.scroll_offset + page).min(max_offset);
+                            }
+                            '1' => {
+                                self.active_tab = 0;
+                                self.scroll_offset = 0;
+                            }
+                            '2' => {
+                                self.active_tab = 1;
+                                self.scroll_offset = 0;
+                            }
+                            '3' => {
+                                self.active_tab = 2;
+                                self.scroll_offset = 0;
+                            }
+                            '4' => {
+                                self.active_tab = 3;
+                                self.scroll_offset = 0;
+                            }
+                            '5' => {
+                                self.active_tab = 4;
+                                self.scroll_offset = 0;
+                            }
+                            '6' => {
+                                self.active_tab = 5;
+                                self.scroll_offset = 0;
+                            }
                             _ => {}
                         }
                     }
@@ -260,7 +376,7 @@ impl Model for MonitorModel {
         let tabs = ["Overview", "Builds", "Distro Repo", "Lookaside CAS", "Mock Chroots", "Database"];
         let tabs_bar = render_tabs(&tabs, self.active_tab, width);
 
-        let body = match self.active_tab {
+        let raw_body = match self.active_tab {
             0 => self.render_overview(width),
             1 => self.render_builds_tab(width),
             2 => self.render_distro_tab(width),
@@ -270,12 +386,34 @@ impl Model for MonitorModel {
             _ => "Unknown tab".to_string(),
         };
 
+        let body_lines: Vec<&str> = raw_body.lines().collect();
+        let total_lines = body_lines.len();
+        let visible_height = self.visible_body_height();
+
+        let (body, scroll_status) = if total_lines > visible_height {
+            let max_offset = total_lines.saturating_sub(visible_height);
+            let offset = self.scroll_offset.min(max_offset);
+            let end = (offset + visible_height).min(total_lines);
+            let slice = &body_lines[offset..end];
+            let percent = if max_offset > 0 {
+                ((offset as f32 / max_offset as f32) * 100.0) as usize
+            } else {
+                100
+            };
+            let status = format!("Scroll: lines {}-{} of {} ({}%)", offset + 1, end, total_lines, percent);
+            (slice.join("\n"), Some(status))
+        } else {
+            (raw_body, None)
+        };
+
         let shortcuts = [
+            ("↑/↓/PgUp/PgDn", "Scroll"),
             ("1-6/Tab", "Switch View"),
             ("r", "Refresh"),
             ("q/Esc", "Quit"),
         ];
-        let footer = render_footer(&shortcuts, self.status_message.as_deref(), width);
+        let effective_status = self.status_message.as_deref().or(scroll_status.as_deref());
+        let footer = render_footer(&shortcuts, effective_status, width);
 
         format!("{}\n{}\n{}\n{}", header, tabs_bar, body, footer)
     }
@@ -652,7 +790,7 @@ pub fn resolve_and_expand_package_macros(
 pub async fn run_monitor(dbs_cfg: DbsConfig, distro_name: Option<String>) -> Result<()> {
     let distro = distro_name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
     let model = MonitorModel::new(dbs_cfg, distro);
-    let program = Program::new(model).with_alt_screen();
+    let program = Program::new(model).with_alt_screen().with_mouse_cell_motion();
     program.run_async().await.map_err(|e| eyre::eyre!("Monitor TUI exited with error: {}", e))?;
     Ok(())
 }
@@ -792,5 +930,86 @@ mod tests {
         assert!(builds_view.contains("RECENT BUILD HISTORY"));
         assert!(builds_view.contains("systemd"));
         assert!(builds_view.contains("42.5s"));
+    }
+
+    #[test]
+    fn test_monitor_scrolling() {
+        let cfg = DbsConfig::default();
+        let mut model = MonitorModel::new(cfg, "tacos".to_string());
+        model.height = 20; // visible_body_height = 20 - 8 = 12
+
+        // Populate mock recent builds so lines exceed visible height
+        for i in 0..25 {
+            model.snapshot.recent_builds.push(Package {
+                id: i,
+                name: format!("pkg-{}", i),
+                epoch: 0,
+                version: "1.0".to_string(),
+                release: "1".to_string(),
+                architecture: 1,
+                package_size: "1 MB".to_string(),
+                file_size_bytes: 1_000_000,
+                source: format!("pkg-{}.src.rpm", i),
+                repository: "build".to_string(),
+                summary: "Test pkg".to_string(),
+                url: "https://test.org".to_string(),
+                license: "MIT".to_string(),
+                description: "Test".to_string(),
+                in_repo: Some(true),
+                created: Some(true),
+                vulnerable: Some(false),
+                build_status: BuildStatus::SUCCESS,
+                build_duration_seconds: Some(10.0),
+                build_log_path: None,
+                error_summary: None,
+                worker_id: Some(1),
+                sourcerpm: None,
+                dist_git_url: None,
+                dist_git_branch: None,
+                dist_git_commit: None,
+                spec_file: None,
+            });
+        }
+
+        // Switch to Builds tab
+        model.update(Message::new(KeyMsg::from_char('2')));
+        assert_eq!(model.active_tab, 1);
+        assert_eq!(model.scroll_offset, 0);
+
+        let max_offset = model.get_max_scroll_offset();
+        assert!(max_offset > 5, "Expected max_offset to be > 5, got {}", max_offset);
+
+        // Test Down arrow
+        model.update(Message::new(KeyMsg::from_type(KeyType::Down)));
+        assert_eq!(model.scroll_offset, 1);
+
+        // Test 'j' key (vim down)
+        model.update(Message::new(KeyMsg::from_char('j')));
+        assert_eq!(model.scroll_offset, 2);
+
+        // Test Up arrow
+        model.update(Message::new(KeyMsg::from_type(KeyType::Up)));
+        assert_eq!(model.scroll_offset, 1);
+
+        // Test 'k' key (vim up)
+        model.update(Message::new(KeyMsg::from_char('k')));
+        assert_eq!(model.scroll_offset, 0);
+
+        // Test PgDown
+        model.update(Message::new(KeyMsg::from_type(KeyType::PgDown)));
+        assert!(model.scroll_offset > 0);
+
+        // Test Home / 'g'
+        model.update(Message::new(KeyMsg::from_char('g')));
+        assert_eq!(model.scroll_offset, 0);
+
+        // Test End / 'G'
+        model.update(Message::new(KeyMsg::from_char('G')));
+        assert_eq!(model.scroll_offset, max_offset);
+
+        // Test switching tabs resets scroll_offset
+        model.update(Message::new(KeyMsg::from_char('1')));
+        assert_eq!(model.active_tab, 0);
+        assert_eq!(model.scroll_offset, 0);
     }
 }
