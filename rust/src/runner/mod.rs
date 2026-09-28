@@ -17,6 +17,19 @@ use tokio::sync::Semaphore;
 
 static REPO_LOCK: Mutex<()> = Mutex::new(());
 
+/// Detailed diagnostic context extracted from build failure logs.
+#[derive(Debug, Clone)]
+pub struct ErrorDiagnostic {
+    /// Concise summary line (e.g. "error: unknown type name 'foo_t' [%build]").
+    pub summary: String,
+    /// Detected failure phase (e.g. "%build", "%check", "%install", "%files", "%prep", "builddep", "buildsrpm").
+    pub phase: Option<String>,
+    /// Relevant log snippet (up to 25 lines) showing the failure context.
+    pub context_lines: Vec<String>,
+    /// Path to the source log file containing the error.
+    pub source_log: PathBuf,
+}
+
 /// Results and output artifacts from a package build execution.
 #[derive(Debug, Clone)]
 pub struct BuildOutput {
@@ -32,6 +45,8 @@ pub struct BuildOutput {
     pub artifacts: Vec<PathBuf>,
     /// Error summary snippet if the build failed.
     pub error_summary: Option<String>,
+    /// Detailed error diagnostic for auto-summary display.
+    pub error_diagnostic: Option<ErrorDiagnostic>,
 }
 
 /// Extensible trait implemented by package build runners in DBS.
@@ -197,7 +212,8 @@ impl MockRunner {
                     let _ = fs::write(&log_path, &runner_log_content);
                 }
 
-                let error_summary = extract_error_summary(
+                let (error_summary, error_diagnostic) = extract_error_diagnostic(
+                    &pkg_result_dir,
                     &log_path,
                     &String::from_utf8_lossy(&srpm_output.stdout),
                     &String::from_utf8_lossy(&srpm_output.stderr),
@@ -210,6 +226,7 @@ impl MockRunner {
                     log_path,
                     artifacts: Vec::new(),
                     error_summary: Some(error_summary),
+                    error_diagnostic,
                 };
                 if let Some(db_url) = &self.db_url
                     && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
@@ -228,6 +245,7 @@ impl MockRunner {
                         log_path,
                         artifacts: Vec::new(),
                         error_summary: Some("Mock --buildsrpm succeeded but no .src.rpm was created".to_string()),
+                        error_diagnostic: None,
                     };
                     if let Some(db_url) = &self.db_url
                         && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
@@ -281,12 +299,13 @@ impl MockRunner {
         }
 
         let artifacts = collect_artifacts(&pkg_result_dir);
-        let error_summary = if !success {
+        let (error_summary, error_diagnostic) = if !success {
             let stdout_str = String::from_utf8_lossy(&rebuild_output.stdout);
             let stderr_str = String::from_utf8_lossy(&rebuild_output.stderr);
-            Some(extract_error_summary(&log_path, &stdout_str, &stderr_str))
+            let (s, d) = extract_error_diagnostic(&pkg_result_dir, &log_path, &stdout_str, &stderr_str);
+            (Some(s), d)
         } else {
-            None
+            (None, None)
         };
 
         let out = BuildOutput {
@@ -296,6 +315,7 @@ impl MockRunner {
             log_path,
             artifacts,
             error_summary,
+            error_diagnostic,
         };
 
         if let Some(db_url) = &self.db_url
@@ -419,12 +439,13 @@ impl MockRunner {
         let _ = fs::write(&log_path, log_content);
 
         let artifacts = collect_artifacts(&local_repo);
-        let error_summary = if !success {
+        let (error_summary, error_diagnostic) = if !success {
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stderr_str = String::from_utf8_lossy(&output.stderr);
-            Some(extract_error_summary(&log_path, &stdout_str, &stderr_str))
+            let (s, d) = extract_error_diagnostic(result_dir, &log_path, &stdout_str, &stderr_str);
+            (Some(s), d)
         } else {
-            None
+            (None, None)
         };
 
         let out = BuildOutput {
@@ -434,6 +455,7 @@ impl MockRunner {
             log_path,
             artifacts,
             error_summary,
+            error_diagnostic,
         };
 
         if let Some(db_url) = &self.db_url
@@ -551,12 +573,13 @@ impl BuildRunner for RpmbuildRunner {
         let _ = fs::write(&log_path, log_content);
 
         let artifacts = collect_artifacts(result_dir);
-        let error_summary = if !success {
+        let (error_summary, error_diagnostic) = if !success {
             let stdout_str = String::from_utf8_lossy(&output.stdout);
             let stderr_str = String::from_utf8_lossy(&output.stderr);
-            Some(extract_error_summary(&log_path, &stdout_str, &stderr_str))
+            let (s, d) = extract_error_diagnostic(result_dir, &log_path, &stdout_str, &stderr_str);
+            (Some(s), d)
         } else {
-            None
+            (None, None)
         };
 
         Ok(BuildOutput {
@@ -566,6 +589,7 @@ impl BuildRunner for RpmbuildRunner {
             log_path,
             artifacts,
             error_summary,
+            error_diagnostic,
         })
     }
 }
@@ -643,21 +667,24 @@ fn extract_error_summary(log_path: &Path, wrapper_stdout: &str, wrapper_stderr: 
                 }
 
                 // Detect specific test failure, compiler error, or packaging error
-                if specific_cause.is_none()
-                    && (trimmed.starts_with("FAIL: ")
-                        || trimmed.starts_with("FAILED: ")
-                        || trimmed.contains(": fatal error: ")
-                        || trimmed.contains(": error: ")
-                        || (trimmed.starts_with("error: ") && !trimmed.contains("error: Bad exit status"))
-                        || (trimmed.contains("make: *** [") && trimmed.contains("Error"))
+                if trimmed.contains(": fatal error: ")
+                    || trimmed.contains(": error: ")
+                    || (trimmed.starts_with("error: ") && !trimmed.contains("error: Bad exit status"))
+                    || trimmed.starts_with("FAIL: ")
+                    || trimmed.starts_with("FAILED: ")
+                {
+                    specific_cause = Some(trimmed.to_string());
+                    if bad_exit_phase.is_some() {
+                        break;
+                    }
+                } else if specific_cause.is_none()
+                    && ((trimmed.contains("make: *** [") && trimmed.contains("Error"))
+                        || (trimmed.contains("make[") && trimmed.contains("Error "))
                         || trimmed.contains("ninja: build stopped:")
                         || trimmed.starts_with("CMake Error at"))
-                    {
-                        specific_cause = Some(trimmed.to_string());
-                        if bad_exit_phase.is_some() {
-                            break;
-                        }
-                    }
+                {
+                    specific_cause = Some(trimmed.to_string());
+                }
             }
 
             match (bad_exit_phase, specific_cause) {
@@ -685,6 +712,130 @@ fn extract_error_summary(log_path: &Path, wrapper_stdout: &str, wrapper_stderr: 
     }
 
     "Mock process exited with failure".to_string()
+}
+
+/// Extracts both a concise summary and a contextual log excerpt for rapid failure diagnosis.
+pub fn extract_error_diagnostic(
+    pkg_result_dir: &Path,
+    log_path: &Path,
+    wrapper_stdout: &str,
+    wrapper_stderr: &str,
+) -> (String, Option<ErrorDiagnostic>) {
+    let summary = extract_error_summary(log_path, wrapper_stdout, wrapper_stderr);
+    let mut phase = None;
+    if let Some(pos) = summary.rfind("(%")
+        && let Some(end) = summary[pos..].find(')') {
+            phase = Some(summary[pos + 1..pos + end].to_string());
+    } else if let Some(pos) = summary.rfind("[%")
+        && let Some(end) = summary[pos..].find(']') {
+            phase = Some(summary[pos + 1..pos + end].to_string());
+    }
+
+    // 1. First attempt: search build.log for the failure context
+    if log_path.exists()
+        && let Ok(lines) = read_tail_lines(log_path, 2 * 1024 * 1024)
+        && !lines.is_empty() {
+            let mut anchor_idx = None;
+            for (idx, line) in lines.iter().enumerate().rev() {
+                let trimmed = line.trim();
+                if trimmed.contains("error: Bad exit status")
+                    || trimmed.contains("RPM build errors:")
+                    || trimmed.contains("Installed (but unpackaged) file(s) found:")
+                    || trimmed.starts_with("File not found:")
+                    || trimmed.starts_with("FAIL: ")
+                    || trimmed.starts_with("FAILED: ")
+                    || trimmed.contains(": fatal error: ")
+                    || (trimmed.starts_with("error: ") && !trimmed.contains("error: Bad exit status"))
+                    || trimmed.contains("ninja: build stopped:")
+                    || (trimmed.contains("make: *** [") && trimmed.contains("Error"))
+                    || (trimmed.contains("make[") && trimmed.contains("Error ")) {
+                        anchor_idx = Some(idx);
+                        break;
+                    }
+            }
+
+            let excerpt = if let Some(anchor) = anchor_idx {
+                let start = anchor.saturating_sub(18);
+                let end = (anchor + 6).min(lines.len());
+                lines[start..end].to_vec()
+            } else {
+                let start = lines.len().saturating_sub(20);
+                lines[start..].to_vec()
+            };
+
+            let diagnostic = ErrorDiagnostic {
+                summary: summary.clone(),
+                phase: phase.clone(),
+                context_lines: excerpt,
+                source_log: log_path.to_path_buf(),
+            };
+            return (summary, Some(diagnostic));
+        }
+
+    // 2. Second attempt: check root.log for dependency or environment errors
+    let root_log = pkg_result_dir.join("root.log");
+    if root_log.exists()
+        && let Ok(root_lines) = read_tail_lines(&root_log, 1024 * 1024)
+        && !root_lines.is_empty() {
+            let mut problem_idx = None;
+            for (idx, line) in root_lines.iter().enumerate().rev() {
+                let trimmed = line.trim();
+                if trimmed.contains("No match for argument:")
+                    || trimmed.contains("Problem:")
+                    || trimmed.contains("conflicting requests")
+                    || trimmed.contains("nothing provides")
+                    || trimmed.starts_with("Error: Problem") {
+                        problem_idx = Some(idx);
+                        break;
+                    }
+            }
+
+            if let Some(anchor) = problem_idx {
+                let start = anchor.saturating_sub(10);
+                let end = (anchor + 12).min(root_lines.len());
+                let excerpt = root_lines[start..end].to_vec();
+                let diag = ErrorDiagnostic {
+                    summary: summary.clone(),
+                    phase: Some("builddep / dnf".to_string()),
+                    context_lines: excerpt,
+                    source_log: root_log,
+                };
+                return (summary, Some(diag));
+            }
+        }
+
+    // 3. Third attempt: check dbs-runner.log
+    let runner_log = pkg_result_dir.join("dbs-runner.log");
+    if runner_log.exists()
+        && let Ok(runner_lines) = read_tail_lines(&runner_log, 512 * 1024)
+        && !runner_lines.is_empty() {
+            let start = runner_lines.len().saturating_sub(20);
+            let excerpt = runner_lines[start..].to_vec();
+            let diag = ErrorDiagnostic {
+                summary: summary.clone(),
+                phase: phase.or(Some("mock-runner".to_string())),
+                context_lines: excerpt,
+                source_log: runner_log,
+            };
+            return (summary, Some(diag));
+        }
+
+    // Fall back to wrapper stdout/stderr lines
+    let combined = format!("{}\n{}", wrapper_stdout, wrapper_stderr);
+    let lines: Vec<String> = combined.lines().map(|s| s.to_string()).collect();
+    if !lines.is_empty() {
+        let start = lines.len().saturating_sub(20);
+        let excerpt = lines[start..].to_vec();
+        let diag = ErrorDiagnostic {
+            summary: summary.clone(),
+            phase: phase.or(Some("runner".to_string())),
+            context_lines: excerpt,
+            source_log: log_path.to_path_buf(),
+        };
+        return (summary, Some(diag));
+    }
+
+    (summary, None)
 }
 
 /// Recursively discovers all generated `.rpm` and `.src.rpm` files within a directory.
@@ -1229,5 +1380,55 @@ missing_pkg
         let (url, fname) = parse_source_entry("local-patch.patch");
         assert_eq!(url, "local-patch.patch");
         assert_eq!(fname, "local-patch.patch");
+    }
+
+    #[test]
+    fn test_extract_error_diagnostic_build_failure() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("build.log");
+        let content = "\
+make[1]: Entering directory '/builddir/build/BUILD/mypkg'
+gcc -O2 -g -c mypkg.c -o mypkg.o
+mypkg.c:42:10: fatal error: header.h: No such file or directory
+   42 | #include <header.h>
+      |          ^~~~~~~~~~
+compilation terminated.
+make[1]: *** [Makefile:120: mypkg.o] Error 1
+make: *** [Makefile:80: all] Error 2
+error: Bad exit status from /var/tmp/rpm-tmp.XYZ (%build)
+
+RPM build errors:
+    Bad exit status from /var/tmp/rpm-tmp.XYZ (%build)
+";
+        fs::write(&log_path, content).unwrap();
+
+        let (summary, diag) = extract_error_diagnostic(dir.path(), &log_path, "", "");
+        assert!(summary.contains("fatal error: header.h"));
+        assert!(summary.contains("(%build)"));
+        assert!(diag.is_some());
+        let d = diag.unwrap();
+        assert_eq!(d.phase.as_deref(), Some("%build"));
+        assert!(d.context_lines.iter().any(|l| l.contains("mypkg.c:42:10: fatal error")));
+    }
+
+    #[test]
+    fn test_extract_error_diagnostic_root_log_failure() {
+        let dir = tempdir().unwrap();
+        let log_path = dir.path().join("build.log");
+        let root_log = dir.path().join("root.log");
+        let root_content = "\
+Starting Mock buildroot initialization...
+Installed: bash-5.2-1.fc41.x86_64
+No match for argument: libsecret-devel >= 0.20
+Error: Problem: package cannot be installed
+  - nothing provides libsecret-devel >= 0.20 needed by myapp.spec
+";
+        fs::write(&root_log, root_content).unwrap();
+
+        let (_summary, diag) = extract_error_diagnostic(dir.path(), &log_path, "", "Command failed: dnf5 builddep");
+        assert!(diag.is_some());
+        let d = diag.unwrap();
+        assert_eq!(d.phase.as_deref(), Some("builddep / dnf"));
+        assert!(d.context_lines.iter().any(|l| l.contains("nothing provides libsecret-devel")));
     }
 }

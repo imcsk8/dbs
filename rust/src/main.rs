@@ -56,6 +56,8 @@ async fn main() -> Result<()> {
         Commands::Lookaside(args) => handlers::handle_lookaside(args, &dbs_cfg).await?,
         Commands::Distro(args) => handlers::handle_distro(args, &dbs_cfg).await?,
         Commands::Db(args) => handlers::handle_db(args, &dbs_cfg).await?,
+        Commands::Shell(args) => handlers::handle_shell(args, &dbs_cfg).await?,
+        Commands::Retry(args) => handlers::handle_retry(args, &dbs_cfg).await?,
         Commands::Config(args) => handlers::handle_config(args, &dbs_cfg, loaded_path.as_deref()).await?,
     }
 

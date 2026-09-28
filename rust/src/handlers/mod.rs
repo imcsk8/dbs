@@ -11,7 +11,7 @@ use eyre::{eyre, Result};
 use crate::cli::{
     self, BuildArgs, ChrootArgs, ChrootCommands, ConfigArgs, ConfigCommands, DagArgs, DbArgs,
     DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs,
-    LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs,
+    LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs, RetryArgs, ShellArgs,
 };
 use crate::chroot;
 use crate::config::DbsConfig;
@@ -697,6 +697,27 @@ fn print_build_output(out: &BuildOutput) {
         println!("  Failure:       {}", err);
     }
     println!("-----------------------------------------------------------");
+
+    if !out.success
+        && let Some(diag) = &out.error_diagnostic {
+            println!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
+            println!("║                   DBS BUILD FAILURE DIAGNOSTIC SUMMARY                   ║");
+            println!("╚═══════════════════════════════════════════════════════════════════════════╝");
+            println!("  Target:     {}", out.target_name);
+            if let Some(phase) = &diag.phase {
+                println!("  Phase:      {}", phase);
+            }
+            println!("  Log Source: {}", diag.source_log.display());
+            println!("  Root Cause: {}", diag.summary);
+            println!("\n  >>> Diagnostic Log Excerpt (last {} lines):", diag.context_lines.len());
+            for line in &diag.context_lines {
+                println!("  │ {}", line);
+            }
+            println!("\n  >>> Recommended Next Actions:");
+            println!("  • Inspect & debug interactively inside chroot: dbs shell {}", out.target_name);
+            println!("  • Retry build after edit:                     dbs retry {}", out.target_name);
+            println!("-----------------------------------------------------------\n");
+    }
 }
 
 /// Dispatches the `dag` subcommand to compute topological build layers and optionally execute builds.
@@ -1012,6 +1033,10 @@ pub async fn handle_chroot(args: ChrootArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!("✓ Successfully initialized chroot configuration: {}", created_path.display());
             println!("  Template created at: {}/templates/{}.tpl", dest.display(), name);
             println!("You can customize this configuration and verify it using 'dbs chroot check {}'", name);
+        }
+
+        ChrootCommands::Shell(shell_args) => {
+            handle_shell(shell_args, dbs_cfg).await?;
         }
     }
 
@@ -1718,6 +1743,225 @@ pub async fn handle_config(args: ConfigArgs, dbs_cfg: &DbsConfig, loaded_path: O
     }
 
     Ok(())
+}
+
+/// Discovers worker unique extension and working directory inside Mock buildroot for a package.
+fn discover_package_chroot(
+    pkg_name: &str,
+    staging_dir: &Path,
+    root_profile: &str,
+) -> (Option<String>, Option<String>) {
+    let mut detected_uniqueext = None;
+    let mut detected_cwd = None;
+
+    // 1. Scan staging dir for worker-<id>-<pkg>
+    if staging_dir.exists()
+        && let Ok(entries) = fs::read_dir(staging_dir) {
+            let prefix = "worker-";
+            let suffix = format!("-{}", pkg_name);
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.starts_with(prefix) && fname.ends_with(&suffix) {
+                    let middle = &fname[prefix.len()..fname.len() - suffix.len()];
+                    if let Ok(id) = middle.parse::<usize>() {
+                        detected_uniqueext = Some(format!("w{}", id));
+                        break;
+                    }
+                }
+            }
+        }
+
+    // 2. Scan /var/lib/mock for matching chroot and BUILD subdirectory
+    let mock_base = Path::new("/var/lib/mock");
+    if mock_base.exists()
+        && let Ok(entries) = fs::read_dir(mock_base) {
+            let uext_tag = detected_uniqueext.as_deref().unwrap_or("");
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // Match root_profile and optional uniqueext
+                if name.contains(root_profile) && (uext_tag.is_empty() || name.ends_with(uext_tag)) {
+                    let build_dir = entry.path().join("root/builddir/build/BUILD");
+                    if build_dir.exists()
+                        && let Ok(sub_entries) = fs::read_dir(&build_dir) {
+                            for sub in sub_entries.flatten() {
+                                let sub_name = sub.file_name().to_string_lossy().to_string();
+                                if sub_name.starts_with(pkg_name) {
+                                    detected_cwd = Some(format!("/builddir/build/BUILD/{}", sub_name));
+                                    break;
+                                }
+                            }
+                            if detected_cwd.is_none() {
+                                detected_cwd = Some("/builddir/build/BUILD".to_string());
+                            }
+                        }
+                    break;
+                }
+            }
+        }
+
+    (detected_uniqueext, detected_cwd)
+}
+
+/// Dispatches the `shell` subcommand to drop interactively into a Mock chroot.
+pub async fn handle_shell(args: ShellArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    let raw_target = &args.package;
+    let pkg_name = Path::new(raw_target)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(raw_target)
+        .trim_end_matches(".spec")
+        .trim_end_matches(".src");
+
+    let staging_dir = args.staging_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+    let mock_root = args.mock_root
+        .or_else(|| dbs_cfg.distro.chroot.clone())
+        .unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+    let mock_config_dir = args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone());
+
+    let resolved = match chroot::ChrootResolver::resolve(&mock_root, mock_config_dir.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return Err(eyre!("Failed to resolve chroot configuration '{}': {}", mock_root, e)),
+    };
+    let root_profile = resolved.profile_name;
+    let config_dir = resolved.config_dir;
+
+    let (detected_uext, detected_cwd) = discover_package_chroot(pkg_name, &staging_dir, &root_profile);
+
+    let effective_uniqueext = args.uniqueext.or(detected_uext);
+    let effective_cwd = args.cwd.or(detected_cwd).unwrap_or_else(|| "/builddir/build/BUILD".to_string());
+
+    println!("===========================================================");
+    println!(" DBS Interactive Mock Chroot Shell");
+    println!(" Target Package:    {}", pkg_name);
+    println!(" Chroot Profile:    {}", root_profile);
+    if let Some(ref uext) = effective_uniqueext {
+        println!(" Unique Extension:  {}", uext);
+    }
+    println!(" Working Directory: {}", effective_cwd);
+    if let Some(ref cfg) = config_dir {
+        println!(" Mock Config Dir:   {}", cfg.display());
+    }
+    println!("===========================================================");
+    println!("Spawning interactive shell inside Mock buildroot...");
+    println!("Hint: type 'exit' or press Ctrl+D to return to host.\n");
+
+    let mut cmd = std::process::Command::new("mock");
+    cmd.arg(format!("-r={}", root_profile));
+    if let Some(cfg) = &config_dir {
+        cmd.arg(format!("--configdir={}", cfg.display()));
+    }
+    if let Some(uext) = &effective_uniqueext {
+        cmd.arg(format!("--uniqueext={}", uext));
+    }
+    cmd.arg(format!("--cwd={}", effective_cwd));
+    cmd.arg("--shell");
+    if !args.cmd.is_empty() {
+        cmd.args(&args.cmd);
+    }
+
+    match cmd.status() {
+        Ok(status) => {
+            if !status.success() {
+                let code = status.code().unwrap_or(-1);
+                eprintln!("\nMock shell exited with code: {}", code);
+            }
+            Ok(())
+        }
+        Err(e) => Err(eyre!(
+            "Failed to execute mock --shell: {}. Ensure 'mock' is installed and current user is in the 'mock' group.",
+            e
+        )),
+    }
+}
+
+/// Dispatches the `retry` subcommand to clean previous worker staging artifacts and rebuild a package.
+pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    let staging_dir = args.output_dir.clone().unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+    let distgit_dest = &dbs_cfg.distgit.dest;
+    let pkg_input = &args.package;
+
+    // Resolve target path (spec or src.rpm)
+    let target = match runner::resolve_package_target(pkg_input, distgit_dest) {
+        Ok(path) => path,
+        Err(_) => {
+            let as_path = PathBuf::from(pkg_input);
+            if as_path.exists() {
+                as_path
+            } else {
+                return Err(eyre!(
+                    "Could not resolve package '{}' in {} or current directory.",
+                    pkg_input,
+                    distgit_dest.display()
+                ));
+            }
+        }
+    };
+
+    let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
+
+    println!("===========================================================");
+    println!(" DBS Package Build Retry");
+    println!(" Target Package:    {}", pkg_stem);
+    println!(" Resolved Spec:     {}", target.display());
+    println!(" Staging Directory: {}", staging_dir.display());
+    println!("===========================================================");
+
+    // Clean up previous failed staging worker directory
+    if staging_dir.exists()
+        && let Ok(entries) = fs::read_dir(&staging_dir) {
+            let prefix = "worker-";
+            let suffix = format!("-{}", pkg_stem);
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.starts_with(prefix) && fname.ends_with(&suffix) {
+                    let worker_path = entry.path();
+                    println!("▶ Removing previous worker staging directory: {}", worker_path.display());
+                    let _ = fs::remove_dir_all(&worker_path);
+                }
+            }
+        }
+
+    // Optionally clean Mock chroot
+    let mock_root = args.mock_root.clone()
+        .or_else(|| dbs_cfg.distro.chroot.clone())
+        .unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+
+    if args.clean_chroot {
+        println!("▶ Cleaning Mock chroot profile: {}...", mock_root);
+        let mut clean_cmd = std::process::Command::new("mock");
+        clean_cmd.arg(format!("-r={}", mock_root));
+        if let Some(cfg) = &args.mock_config_dir.as_ref().or(dbs_cfg.chroot.config_dir.as_ref()) {
+            clean_cmd.arg(format!("--configdir={}", cfg.display()));
+        }
+        clean_cmd.arg("--clean");
+        match clean_cmd.status() {
+            Ok(s) if s.success() => println!("✓ Mock chroot cleaned successfully."),
+            Ok(s) => eprintln!("Warning: mock --clean exited with status: {}", s),
+            Err(e) => eprintln!("Warning: failed to execute mock --clean: {}", e),
+        }
+    }
+
+    // Trigger rebuild with force=true and skip_existing=false
+    let build_args = BuildArgs {
+        runner: "mock".to_string(),
+        mock_root: args.mock_root,
+        mock_config_dir: args.mock_config_dir,
+        output_dir: args.output_dir,
+        concurrency: args.concurrency.or(Some(1)),
+        smp: args.smp,
+        dynamic_repo: true,
+        chain: false,
+        continue_on_error: false,
+        packages: None,
+        targets: vec![target],
+        record_db: args.record_db,
+        lookaside_dir: args.lookaside_dir,
+        fetch_sources: true,
+        skip_existing: false,
+        force: true,
+    };
+
+    handle_build(build_args, dbs_cfg).await
 }
 
 

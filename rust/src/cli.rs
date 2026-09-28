@@ -73,6 +73,12 @@ pub enum Commands {
     #[command(alias = "top", alias = "dashboard")]
     Monitor(MonitorArgs),
 
+    /// Drop into an interactive Mock chroot shell at a package's build environment.
+    Shell(ShellArgs),
+
+    /// Clean staging artifacts and retry the build for a failed package.
+    Retry(RetryArgs),
+
     /// Manage, view, and initialize DBS TOML configuration files.
     Config(ConfigArgs),
 }
@@ -420,6 +426,9 @@ pub enum ChrootCommands {
         #[arg(long)]
         smp_cpus: Option<usize>,
     },
+
+    /// Drop into an interactive Mock chroot shell at a package's build environment.
+    Shell(ShellArgs),
 }
 
 /// Arguments for the `lookaside` subcommand.
@@ -755,5 +764,75 @@ pub enum ConfigCommands {
         #[arg(short, long)]
         force: bool,
     },
+}
+
+/// Arguments for the `shell` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct ShellArgs {
+    /// Package name or spec/SRPM path to enter build chroot for (e.g. gcc, /srv/dbs/tacos/rpm/gcc/gcc.spec).
+    pub package: String,
+
+    /// Mock chroot configuration profile name or .cfg path (defaults to [chroot].profile in dbs.toml).
+    #[arg(short = 'r', long)]
+    pub mock_root: Option<String>,
+
+    /// Path to directory containing Mock configuration profiles.
+    #[arg(long)]
+    pub mock_config_dir: Option<PathBuf>,
+
+    /// Staging directory containing worker directories (defaults to [distro].staging_dir in dbs.toml).
+    #[arg(short = 's', long)]
+    pub staging_dir: Option<PathBuf>,
+
+    /// Specific worker unique extension (e.g. w1, w2). Auto-detected if omitted.
+    #[arg(short = 'u', long)]
+    pub uniqueext: Option<String>,
+
+    /// Working directory inside the chroot (defaults to auto-detected /builddir/build/BUILD/<pkg>*).
+    #[arg(long)]
+    pub cwd: Option<String>,
+
+    /// Optional command to execute within chroot instead of interactive shell.
+    #[arg(trailing_var_arg = true)]
+    pub cmd: Vec<String>,
+}
+
+/// Arguments for the `retry` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct RetryArgs {
+    /// Package name or spec/SRPM path to retry building (e.g. gcc, /srv/dbs/tacos/rpm/gcc/gcc.spec).
+    pub package: String,
+
+    /// Mock chroot configuration profile name or .cfg path (defaults to [chroot].profile in dbs.toml).
+    #[arg(short = 'r', long)]
+    pub mock_root: Option<String>,
+
+    /// Path to directory containing Mock configuration profiles.
+    #[arg(long)]
+    pub mock_config_dir: Option<PathBuf>,
+
+    /// Directory for build logs and staged RPM artifacts (defaults to [distro].staging_dir in dbs.toml).
+    #[arg(short = 'o', long)]
+    pub output_dir: Option<PathBuf>,
+
+    /// Number of concurrent Mock worker processes (defaults to 1 for retry).
+    #[arg(short = 'j', long)]
+    pub concurrency: Option<usize>,
+
+    /// Max SMP concurrency CPUs for package compilation inside Mock (%_smp_mflags / %_smp_build_ncpus).
+    #[arg(long, env = "DBS_SMP_CPUS")]
+    pub smp: Option<usize>,
+
+    /// Clean Mock chroot before retrying build (mock --clean).
+    #[arg(long)]
+    pub clean_chroot: bool,
+
+    /// Record build metrics, status, and output artifacts into PostgreSQL database.
+    #[arg(long)]
+    pub record_db: bool,
+
+    /// Path to local lookaside cache for instant BTRFS CoW staging of source tarballs.
+    #[arg(long, env = "DBS_LOOKASIDE_DIR")]
+    pub lookaside_dir: Option<PathBuf>,
 }
 
