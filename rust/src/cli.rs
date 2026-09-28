@@ -79,6 +79,10 @@ pub enum Commands {
     /// Clean staging artifacts and retry the build for a failed package.
     Retry(RetryArgs),
 
+    /// Clean staging artifacts, remove built RPMs from repository, and reset build database records.
+    #[command(alias = "delete-build", alias = "purge")]
+    Clean(CleanArgs),
+
     /// Manage, view, and initialize DBS TOML configuration files.
     Config(ConfigArgs),
 }
@@ -834,5 +838,56 @@ pub struct RetryArgs {
     /// Path to local lookaside cache for instant BTRFS CoW staging of source tarballs.
     #[arg(long, env = "DBS_LOOKASIDE_DIR")]
     pub lookaside_dir: Option<PathBuf>,
+}
+
+/// Arguments for the `clean` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct CleanArgs {
+    /// Package name or spec/SRPM path to clean (e.g. gcc, /srv/dbs/tacos/rpm/gcc/gcc.spec).
+    pub package: Option<String>,
+
+    /// Clean all staging directories and build artifacts across all packages.
+    #[arg(short = 'a', long)]
+    pub all: bool,
+
+    /// Clean only worker staging directories and build logs (leaves repository RPMs intact).
+    #[arg(long, conflicts_with = "repo_only")]
+    pub staging_only: bool,
+
+    /// Clean only published RPMs from the repository (leaves staging logs intact).
+    #[arg(long, conflicts_with = "staging_only")]
+    pub repo_only: bool,
+
+    /// Clean Mock chroot profile (mock --clean).
+    #[arg(long)]
+    pub clean_chroot: bool,
+
+    /// Mock chroot configuration profile name or direct path to a .cfg file.
+    #[arg(short = 'r', long)]
+    pub mock_root: Option<String>,
+
+    /// Path to directory containing Mock configuration profiles.
+    #[arg(long)]
+    pub mock_config_dir: Option<PathBuf>,
+
+    /// Staging directory containing worker directories (defaults to [distro].staging_dir in dbs.toml).
+    #[arg(short = 's', long)]
+    pub staging_dir: Option<PathBuf>,
+
+    /// Repository root directory containing published RPMs (defaults to [distro].dest in dbs.toml).
+    #[arg(long)]
+    pub repo_dir: Option<PathBuf>,
+
+    /// Target architecture to clean in repo (defaults to [distro].arch in dbs.toml).
+    #[arg(long)]
+    pub arch: Option<String>,
+
+    /// Do not update createrepo_c metadata after removing RPMs.
+    #[arg(long)]
+    pub no_repo_update: bool,
+
+    /// Do not reset database build status and package_artifact records.
+    #[arg(long)]
+    pub no_db: bool,
 }
 

@@ -16,6 +16,27 @@ pub enum PkgCommands {
     },
     /// Build packages for a distribution (placeholder)
     Build(BuildPkgArgs),
+    /// Clean build artifacts (staging, repository RPMs, and database build state) for a package
+    Clean(CleanPkgArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct CleanPkgArgs {
+    /// The name of the package to clean
+    #[arg(long, conflicts_with = "id")]
+    pub name: Option<String>,
+    /// The ID of the package to clean
+    #[arg(long)]
+    pub id: Option<i32>,
+    /// Clean all staging directories and build artifacts across all packages
+    #[arg(short = 'a', long)]
+    pub all: bool,
+    /// Clean only worker staging directories and build logs
+    #[arg(long)]
+    pub staging_only: bool,
+    /// Clean only published RPMs from the repository
+    #[arg(long)]
+    pub repo_only: bool,
 }
 
 #[derive(Args, Debug)]

@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
         Commands::Db(args) => handlers::handle_db(args, &dbs_cfg).await?,
         Commands::Shell(args) => handlers::handle_shell(args, &dbs_cfg).await?,
         Commands::Retry(args) => handlers::handle_retry(args, &dbs_cfg).await?,
+        Commands::Clean(args) => handlers::handle_clean(args, &dbs_cfg).await?,
         Commands::Config(args) => handlers::handle_config(args, &dbs_cfg, loaded_path.as_deref()).await?,
     }
 

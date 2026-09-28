@@ -117,6 +117,28 @@ dbs retry /srv/dbs/tacos/rpm/vim/vim.spec
 
 ---
 
+### 2.4 `dbs clean [pkg]`: Build Deletion & Repository Purge
+
+`dbs clean` (aliases: `dbs delete-build`, `dbs purge`, `dbs build clean`, `dbs pkg clean`) removes build artifacts and resets package state without destroying package catalog metadata definitions:
+
+1. **Worker Staging Cleanup:** Deletes `/srv/dbs/tacos/staging/worker-*-<pkg>/` directories, intermediate RPMs, and build logs.
+2. **Repository Purge:** Deletes published `.rpm` and `.src.rpm` files for the target package from `/srv/dbs/tacos/distro/<arch>/` (including subpackages whose `SOURCERPM` originates from `<pkg>`).
+3. **Repository Re-indexing:** Automatically executes `createrepo_c` to keep DNF repodata synchronized.
+4. **Database Reset:** Deletes rows in `package_artifact` and resets `package.build_status` to `PENDING` (clearing duration, log paths, and error diagnostics).
+
+```bash
+# Purge all build artifacts (staging + repository RPMs) and reset DB state for a package
+dbs clean gcc
+
+# Options:
+dbs clean gcc --staging-only    # Only clean worker staging logs & intermediate files (leaves repo RPMs intact)
+dbs clean gcc --repo-only       # Only remove published RPMs from repo & run createrepo_c
+dbs clean gcc --clean-chroot    # Also clean the Mock chroot profile (mock --clean)
+dbs clean --all                 # Wipe all worker staging directories and reset all package build records
+```
+
+---
+
 ## 3. Failure Categories & Step-by-Step Recipes
 
 ### Category 0: Lookaside & Source Fetching Failures

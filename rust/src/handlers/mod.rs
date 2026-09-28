@@ -12,6 +12,7 @@ use crate::cli::{
     self, BuildArgs, ChrootArgs, ChrootCommands, ConfigArgs, ConfigCommands, DagArgs, DbArgs,
     DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs,
     LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs, RetryArgs, ShellArgs,
+    CleanArgs,
 };
 use crate::chroot;
 use crate::config::DbsConfig;
@@ -318,6 +319,30 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
 
 /// Dispatches the `build` subcommand.
 pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    // Intercept 'dbs build clean [package]' or 'dbs build delete [package]'
+    if let Some(first) = args.targets.first() {
+        let first_str = first.to_string_lossy();
+        if first_str == "clean" || first_str == "delete" {
+            let pkg = args.targets.get(1).map(|p| p.to_string_lossy().to_string());
+            let record_db = args.record_db || dbs_cfg.database.record_db;
+            let clean_args = CleanArgs {
+                package: pkg,
+                all: args.targets.len() <= 1,
+                staging_only: false,
+                repo_only: false,
+                clean_chroot: false,
+                mock_root: args.mock_root,
+                mock_config_dir: args.mock_config_dir,
+                staging_dir: args.output_dir,
+                repo_dir: None,
+                arch: None,
+                no_repo_update: false,
+                no_db: !record_db,
+            };
+            return handle_clean(clean_args, dbs_cfg).await;
+        }
+    }
+
     let output_dir = args.output_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
     let concurrency = args.concurrency.unwrap_or(dbs_cfg.distgit.concurrency);
     let mock_root = args.mock_root.or_else(|| Some(dbs_cfg.chroot.profile.clone()));
@@ -648,6 +673,38 @@ pub async fn handle_pkg(args: PkgArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         }
         cli::pkg::PkgCommands::Build(build_args) => {
             println!("Package build action for: {:?}", build_args);
+        }
+        cli::pkg::PkgCommands::Clean(clean_pkg_args) => {
+            let pkg_name = if let Some(n) = clean_pkg_args.name {
+                Some(n)
+            } else if let Some(id) = clean_pkg_args.id {
+                let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
+                use diesel::prelude::*;
+                match crate::schema::package::table
+                    .filter(crate::schema::package::id.eq(id))
+                    .load::<crate::models::Package>(&mut conn)
+                {
+                    Ok(pkgs) if !pkgs.is_empty() => Some(pkgs[0].name.clone()),
+                    _ => return Err(eyre!("Package ID {} not found in database.", id)),
+                }
+            } else {
+                None
+            };
+            let clean_args = CleanArgs {
+                package: pkg_name,
+                all: clean_pkg_args.all,
+                staging_only: clean_pkg_args.staging_only,
+                repo_only: clean_pkg_args.repo_only,
+                clean_chroot: false,
+                mock_root: None,
+                mock_config_dir: None,
+                staging_dir: None,
+                repo_dir: None,
+                arch: None,
+                no_repo_update: false,
+                no_db: false,
+            };
+            return handle_clean(clean_args, dbs_cfg).await;
         }
     }
     Ok(())
@@ -1969,6 +2026,439 @@ pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     };
 
     handle_build(build_args, dbs_cfg).await
+}
+
+/// Dispatches the `clean` subcommand to purge build artifacts, staging environments,
+/// repository RPMs, and reset build database records.
+pub async fn handle_clean(args: CleanArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    if args.package.is_none() && !args.all {
+        return Err(eyre!(
+            "Please specify a package name to clean (e.g. 'dbs clean gcc') or use '--all' to clean all build artifacts."
+        ));
+    }
+
+    let staging_dir = args
+        .staging_dir
+        .clone()
+        .unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
+    let repo_dir = args
+        .repo_dir
+        .clone()
+        .unwrap_or_else(|| dbs_cfg.distro.dest.clone());
+    let target_arch = args
+        .arch
+        .clone()
+        .unwrap_or_else(|| dbs_cfg.distro.arch.clone());
+    let distgit_dest = &dbs_cfg.distgit.dest;
+
+    // Resolve target package name / stem if specified
+    let (pkg_name, target_spec) = match &args.package {
+        Some(pkg_input) => {
+            let resolved = runner::resolve_package_target(pkg_input, distgit_dest).ok();
+            let stem = if let Some(ref path) = resolved {
+                path.file_stem().and_then(|s| s.to_str()).unwrap_or(pkg_input).to_string()
+            } else {
+                let as_path = PathBuf::from(pkg_input);
+                if as_path.exists() {
+                    as_path.file_stem().and_then(|s| s.to_str()).unwrap_or(pkg_input).to_string()
+                } else {
+                    pkg_input.to_string()
+                }
+            };
+            (Some(stem), resolved)
+        }
+        None => (None, None),
+    };
+
+    println!("===========================================================");
+    println!(" DBS Clean Build Artifacts");
+    if let Some(ref name) = pkg_name {
+        println!(" Target Package:    {}", name);
+        if let Some(ref spec) = target_spec {
+            println!(" Resolved Target:   {}", spec.display());
+        }
+    } else {
+        println!(" Target:            ALL PACKAGES (--all)");
+    }
+    println!(" Staging Directory: {}", staging_dir.display());
+    println!(" Repository:        {}", repo_dir.display());
+    println!(" Target Arch:       {}", target_arch);
+    println!(" Staging Only:      {}", args.staging_only);
+    println!(" Repo Only:         {}", args.repo_only);
+    println!("===========================================================");
+
+    let mut staging_removed_count = 0usize;
+    let mut repo_rpms_removed_count = 0usize;
+    let mut db_artifacts_removed_count = 0usize;
+    let mut db_packages_reset_count = 0usize;
+
+    // 1. Clean Staging Directories
+    if !args.repo_only && staging_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&staging_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let fname = entry.file_name().to_string_lossy().to_string();
+
+                let should_remove = match &pkg_name {
+                    Some(name) => {
+                        let worker_prefix = "worker-";
+                        let worker_suffix = format!("-{}", name);
+                        (fname.starts_with(worker_prefix) && fname.ends_with(&worker_suffix))
+                            || fname == *name
+                            || (fname.starts_with(&format!("{}-", name)) && fname.ends_with(".rpm"))
+                    }
+                    None => {
+                        // --all mode: remove all worker directories and temporary build artifacts
+                        fname.starts_with("worker-") || fname.ends_with(".rpm") || fname.ends_with(".log")
+                    }
+                };
+
+                if should_remove {
+                    if path.is_dir() {
+                        println!("▶ Removing staging directory: {}", path.display());
+                        match fs::remove_dir_all(&path) {
+                            Ok(_) => staging_removed_count += 1,
+                            Err(e) => eprintln!("Warning: failed to remove {}: {}", path.display(), e),
+                        }
+                    } else if path.is_file() {
+                        println!("▶ Removing staging file: {}", path.display());
+                        match fs::remove_file(&path) {
+                            Ok(_) => staging_removed_count += 1,
+                            Err(e) => eprintln!("Warning: failed to remove {}: {}", path.display(), e),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check staging/localrepo or staging/rpms
+        let extra_staging_dirs = [
+            staging_dir.join("localrepo"),
+            staging_dir.join("rpms").join(&target_arch),
+            staging_dir.join("rpms").join("noarch"),
+        ];
+        for extra_dir in extra_staging_dirs {
+            if extra_dir.exists()
+                && let Ok(entries) = fs::read_dir(&extra_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_file() {
+                            let fname = entry.file_name().to_string_lossy().to_string();
+                            let matches = match &pkg_name {
+                                Some(name) => {
+                                    fname.starts_with(&format!("{}-", name)) && fname.ends_with(".rpm")
+                                }
+                                None => fname.ends_with(".rpm"),
+                            };
+                            if matches {
+                                println!("▶ Removing staging artifact: {}", path.display());
+                                match fs::remove_file(&path) {
+                                    Ok(_) => staging_removed_count += 1,
+                                    Err(e) => eprintln!("Warning: failed to remove {}: {}", path.display(), e),
+                                }
+                            }
+                        }
+                    }
+                }
+        }
+    }
+
+    // 2. Clean Published Repository RPMs
+    if !args.staging_only && repo_dir.exists() {
+        let mut search_dirs = vec![
+            repo_dir.clone(),
+            repo_dir.join(&target_arch),
+            repo_dir.join("noarch"),
+            repo_dir.join("SRPMS"),
+            repo_dir.join("src"),
+            repo_dir.join("Packages"),
+        ];
+
+        // Also discover any child directories inside repo_dir (excluding repodata)
+        if let Ok(entries) = fs::read_dir(&repo_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && entry.file_name() != "repodata" && !search_dirs.contains(&path) {
+                    search_dirs.push(path);
+                }
+            }
+        }
+
+        let mut rpms_to_delete = Vec::new();
+
+        for dir in &search_dirs {
+            if !dir.exists() {
+                continue;
+            }
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    if !fname.ends_with(".rpm") {
+                        continue;
+                    }
+
+                    let is_match = match &pkg_name {
+                        Some(name) => {
+                            // Check header with librpm for 100% precision
+                            if let Ok(hdr) = librpm::package::PackageHeader::from_file(
+                                &path,
+                                Some(&librpm::verify::VerifyOptions::skip_verification()),
+                            ) {
+                                let hdr_name = hdr.name();
+                                let mut matches = hdr_name == *name;
+                                if !matches {
+                                    // Check if source RPM matches package name (subpackages e.g. gcc-c++, libgcc)
+                                    if let Some(librpm::TagData::Str(src_rpm)) = hdr.get(librpm::Tag::SOURCERPM)
+                                        && src_rpm.starts_with(&format!("{}-", name)) {
+                                            matches = true;
+                                        }
+                                }
+                                matches
+                            } else {
+                                // Fallback filename prefix check
+                                fname.starts_with(&format!("{}-", name))
+                            }
+                        }
+                        None => true, // --all matches all RPMs in repository
+                    };
+
+                    if is_match && !rpms_to_delete.contains(&path) {
+                        rpms_to_delete.push(path);
+                    }
+                }
+            }
+        }
+
+        for rpm_path in rpms_to_delete {
+            println!("▶ Removing repository RPM: {}", rpm_path.display());
+            match fs::remove_file(&rpm_path) {
+                Ok(_) => repo_rpms_removed_count += 1,
+                Err(e) => eprintln!("Warning: failed to remove {}: {}", rpm_path.display(), e),
+            }
+        }
+
+        // Re-index repository via createrepo_c if RPMs were deleted
+        if repo_rpms_removed_count > 0 && !args.no_repo_update {
+            println!("▶ Refreshing repository metadata via createrepo_c...");
+            let update_dirs = [
+                repo_dir.join(&target_arch),
+                repo_dir.clone(),
+            ];
+            for u_dir in update_dirs {
+                if u_dir.exists() {
+                    runner::update_local_repo(&u_dir);
+                }
+            }
+            println!("✓ Repository metadata refreshed.");
+        }
+    }
+
+    // 3. Clean Mock Chroot if requested
+    if args.clean_chroot {
+        let mock_root = args
+            .mock_root
+            .clone()
+            .or_else(|| dbs_cfg.distro.chroot.clone())
+            .unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+        println!("▶ Cleaning Mock chroot profile: {}...", mock_root);
+        let mut clean_cmd = std::process::Command::new("mock");
+        clean_cmd.arg(format!("-r={}", mock_root));
+        if let Some(cfg) = &args.mock_config_dir.as_ref().or(dbs_cfg.chroot.config_dir.as_ref()) {
+            clean_cmd.arg(format!("--configdir={}", cfg.display()));
+        }
+        clean_cmd.arg("--clean");
+        match clean_cmd.status() {
+            Ok(s) if s.success() => println!("✓ Mock chroot cleaned successfully."),
+            Ok(s) => eprintln!("Warning: mock --clean exited with status: {}", s),
+            Err(e) => eprintln!("Warning: failed to execute mock --clean: {}", e),
+        }
+    }
+
+    // 4. Reset Database Records
+    if !args.no_db {
+        match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
+            Ok(mut conn) => {
+                match &pkg_name {
+                    Some(name) => {
+                        if let Ok(Some(pkg)) = db::find_package_by_name(&mut conn, name) {
+                            // Check if package has recorded artifacts and clean any lingering on-disk paths
+                            if let Ok(arts) = db::list_package_artifacts(&mut conn, pkg.id) {
+                                for art in arts {
+                                    let p = PathBuf::from(&art.rpm_path);
+                                    if p.exists() && !args.staging_only {
+                                        let _ = fs::remove_file(&p);
+                                    }
+                                }
+                            }
+                            if let Ok(count) = db::delete_package_artifacts_by_package_id(&mut conn, pkg.id) {
+                                db_artifacts_removed_count += count;
+                            }
+                            if db::reset_package_build_status(&mut conn, pkg.id).is_ok() {
+                                db_packages_reset_count += 1;
+                            }
+                            println!("✓ Reset database build status for '{}' to PENDING.", name);
+                        } else {
+                            println!("Note: package '{}' not found in database catalog.", name);
+                        }
+                    }
+                    None => {
+                        // --all mode: reset all packages and remove all artifacts
+                        if let Ok(count) = db::delete_all_package_artifacts(&mut conn) {
+                            db_artifacts_removed_count += count;
+                        }
+                        if let Ok(count) = db::reset_all_package_build_statuses(&mut conn) {
+                            db_packages_reset_count += count;
+                        }
+                        println!("✓ Reset database build status for {} package(s) to PENDING.", db_packages_reset_count);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Note: Database not reachable or not configured ({}). Skipped DB reset.", e);
+            }
+        }
+    }
+
+    println!("===========================================================");
+    println!(" DBS Build Cleanup Complete");
+    println!("  * Staging items removed:     {}", staging_removed_count);
+    println!("  * Repository RPMs removed:   {}", repo_rpms_removed_count);
+    if !args.no_db {
+        println!("  * DB Artifacts deleted:      {}", db_artifacts_removed_count);
+        println!("  * DB Packages reset:         {}", db_packages_reset_count);
+    }
+    println!("===========================================================");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_clean_requires_target_or_all() {
+        let (dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let args = CleanArgs {
+            package: None,
+            all: false,
+            staging_only: false,
+            repo_only: false,
+            clean_chroot: false,
+            mock_root: None,
+            mock_config_dir: None,
+            staging_dir: None,
+            repo_dir: None,
+            arch: None,
+            no_repo_update: true,
+            no_db: true,
+        };
+        let res = handle_clean(args, &dbs_cfg).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Please specify a package name"));
+    }
+
+    #[tokio::test]
+    async fn test_clean_package_staging_and_repo() {
+        let (mut dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let temp_staging = tempdir().unwrap();
+        let temp_repo = tempdir().unwrap();
+
+        // Create staging worker directories
+        let worker_foo = temp_staging.path().join("worker-1-foopkg");
+        let worker_bar = temp_staging.path().join("worker-2-barpkg");
+        fs::create_dir_all(&worker_foo).unwrap();
+        fs::create_dir_all(&worker_bar).unwrap();
+        fs::write(worker_foo.join("build.log"), "foo log").unwrap();
+        fs::write(worker_bar.join("build.log"), "bar log").unwrap();
+
+        // Create repo files
+        let repo_x86 = temp_repo.path().join("x86_64");
+        fs::create_dir_all(&repo_x86).unwrap();
+        let foo_rpm = repo_x86.join("foopkg-1.0-1.tcrs.x86_64.rpm");
+        let bar_rpm = repo_x86.join("barpkg-2.0-1.tcrs.x86_64.rpm");
+        fs::write(&foo_rpm, "dummy rpm content").unwrap();
+        fs::write(&bar_rpm, "dummy rpm content").unwrap();
+
+        dbs_cfg.distro.staging_dir = temp_staging.path().to_path_buf();
+        dbs_cfg.distro.dest = temp_repo.path().to_path_buf();
+
+        let args = CleanArgs {
+            package: Some("foopkg".to_string()),
+            all: false,
+            staging_only: false,
+            repo_only: false,
+            clean_chroot: false,
+            mock_root: None,
+            mock_config_dir: None,
+            staging_dir: Some(temp_staging.path().to_path_buf()),
+            repo_dir: Some(temp_repo.path().to_path_buf()),
+            arch: Some("x86_64".to_string()),
+            no_repo_update: true,
+            no_db: true,
+        };
+
+        let res = handle_clean(args, &dbs_cfg).await;
+        assert!(res.is_ok());
+
+        // foopkg staging and repo files should be removed
+        assert!(!worker_foo.exists());
+        assert!(!foo_rpm.exists());
+
+        // barpkg staging and repo files should remain untouched
+        assert!(worker_bar.exists());
+        assert!(bar_rpm.exists());
+    }
+
+    #[tokio::test]
+    async fn test_clean_all() {
+        let (mut dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let temp_staging = tempdir().unwrap();
+        let temp_repo = tempdir().unwrap();
+
+        let worker_foo = temp_staging.path().join("worker-1-foopkg");
+        let worker_bar = temp_staging.path().join("worker-2-barpkg");
+        fs::create_dir_all(&worker_foo).unwrap();
+        fs::create_dir_all(&worker_bar).unwrap();
+
+        let repo_x86 = temp_repo.path().join("x86_64");
+        fs::create_dir_all(&repo_x86).unwrap();
+        let foo_rpm = repo_x86.join("foopkg-1.0-1.tcrs.x86_64.rpm");
+        let bar_rpm = repo_x86.join("barpkg-2.0-1.tcrs.x86_64.rpm");
+        fs::write(&foo_rpm, "dummy").unwrap();
+        fs::write(&bar_rpm, "dummy").unwrap();
+
+        dbs_cfg.distro.staging_dir = temp_staging.path().to_path_buf();
+        dbs_cfg.distro.dest = temp_repo.path().to_path_buf();
+
+        let args = CleanArgs {
+            package: None,
+            all: true,
+            staging_only: false,
+            repo_only: false,
+            clean_chroot: false,
+            mock_root: None,
+            mock_config_dir: None,
+            staging_dir: Some(temp_staging.path().to_path_buf()),
+            repo_dir: Some(temp_repo.path().to_path_buf()),
+            arch: Some("x86_64".to_string()),
+            no_repo_update: true,
+            no_db: true,
+        };
+
+        let res = handle_clean(args, &dbs_cfg).await;
+        assert!(res.is_ok());
+
+        assert!(!worker_foo.exists());
+        assert!(!worker_bar.exists());
+        assert!(!foo_rpm.exists());
+        assert!(!bar_rpm.exists());
+    }
 }
 
 

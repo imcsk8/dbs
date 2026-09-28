@@ -194,6 +194,40 @@ pub fn update_package_build_result(
     }
 }
 
+/// Resets the build metrics and status for a package record back to PENDING.
+pub fn reset_package_build_status(conn: &mut PgConnection, pkg_id: i32) -> Result<()> {
+    match diesel::update(package::table.filter(package::id.eq(pkg_id)))
+        .set((
+            package::build_status.eq(BuildStatus::PENDING),
+            package::build_duration_seconds.eq(None::<f32>),
+            package::build_log_path.eq(None::<String>),
+            package::error_summary.eq(None::<String>),
+            package::worker_id.eq(None::<i32>),
+        ))
+        .execute(conn)
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(eyre!("Failed to reset build status for package ID {}: {}", pkg_id, e)),
+    }
+}
+
+/// Resets the build metrics and status for all packages back to PENDING.
+pub fn reset_all_package_build_statuses(conn: &mut PgConnection) -> Result<usize> {
+    match diesel::update(package::table)
+        .set((
+            package::build_status.eq(BuildStatus::PENDING),
+            package::build_duration_seconds.eq(None::<f32>),
+            package::build_log_path.eq(None::<String>),
+            package::error_summary.eq(None::<String>),
+            package::worker_id.eq(None::<i32>),
+        ))
+        .execute(conn)
+    {
+        Ok(count) => Ok(count),
+        Err(e) => Err(eyre!("Failed to reset build status for all packages: {}", e)),
+    }
+}
+
 /// Inserts provided capability records for a package.
 pub fn insert_package_provides(
     conn: &mut PgConnection,
@@ -243,6 +277,33 @@ pub fn insert_package_artifact(
             artifact.rpm_filename,
             e
         )),
+    }
+}
+
+/// Lists all package artifact records associated with a package ID.
+pub fn list_package_artifacts(conn: &mut PgConnection, pkg_id: i32) -> Result<Vec<PackageArtifact>> {
+    match package_artifact::table
+        .filter(package_artifact::id_package.eq(Some(pkg_id)))
+        .load::<PackageArtifact>(conn)
+    {
+        Ok(arts) => Ok(arts),
+        Err(e) => Err(eyre!("Failed to load artifacts for package ID {}: {}", pkg_id, e)),
+    }
+}
+
+/// Deletes package artifact records associated with a package ID.
+pub fn delete_package_artifacts_by_package_id(conn: &mut PgConnection, pkg_id: i32) -> Result<usize> {
+    match diesel::delete(package_artifact::table.filter(package_artifact::id_package.eq(Some(pkg_id)))).execute(conn) {
+        Ok(count) => Ok(count),
+        Err(e) => Err(eyre!("Failed to delete artifacts for package ID {}: {}", pkg_id, e)),
+    }
+}
+
+/// Deletes all package artifact records.
+pub fn delete_all_package_artifacts(conn: &mut PgConnection) -> Result<usize> {
+    match diesel::delete(package_artifact::table).execute(conn) {
+        Ok(count) => Ok(count),
+        Err(e) => Err(eyre!("Failed to delete all package artifacts: {}", e)),
     }
 }
 
