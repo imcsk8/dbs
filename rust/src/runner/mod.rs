@@ -133,7 +133,14 @@ impl MockRunner {
         // Record build started state in database
         if let Some(db_url) = &self.db_url
             && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
-                let _ = crate::db::record_build_start(&mut conn, pkg_stem, Some(worker_id as i32), Some(&log_path.display().to_string()));
+                let spec_meta = crate::distgit::spec::parse_spec_file(input_path).ok();
+                let _ = crate::db::record_build_start(
+                    &mut conn,
+                    pkg_stem,
+                    Some(worker_id as i32),
+                    Some(&log_path.display().to_string()),
+                    spec_meta.as_ref(),
+                );
             }
 
         let is_srpm = input_path.to_string_lossy().ends_with(".src.rpm");
@@ -293,7 +300,14 @@ impl MockRunner {
             && let Ok(mut conn) = crate::db::establish_connection_with_url(Some(db_url)) {
                 for target in targets {
                     let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
-                    let _ = crate::db::record_build_start(&mut conn, pkg_stem, Some(1), Some(&log_path.display().to_string()));
+                    let spec_meta = crate::distgit::spec::parse_spec_file(target).ok();
+                    let _ = crate::db::record_build_start(
+                        &mut conn,
+                        pkg_stem,
+                        Some(1),
+                        Some(&log_path.display().to_string()),
+                        spec_meta.as_ref(),
+                    );
                 }
             }
 

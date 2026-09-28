@@ -9,6 +9,9 @@ use bubbletea::{Cmd, KeyMsg, KeyType, Message, Model, Program, WindowSizeMsg, qu
 use eyre::Result;
 use lipgloss::{Position, Style};
 
+use diesel::prelude::*;
+use diesel::pg::PgConnection;
+
 use crate::chroot::{ChrootConfig, ChrootResolver};
 use crate::config::DbsConfig;
 use crate::db::{
@@ -18,6 +21,7 @@ use crate::db::{
 use crate::distro::{get_distro_status, DistroStatus};
 use crate::lookaside::{LookasideManager, LookasideStatus};
 use crate::models::Package;
+use crate::schema::package;
 use crate::tui::theme::{render_badge, render_card, render_footer, render_header, render_tabs, BadgeKind, Palette};
 use crate::types::BuildStatus;
 
@@ -102,6 +106,20 @@ impl MonitorSnapshot {
             }
             if let Ok(counts) = get_build_counts(&mut conn) {
                 build_counts = counts;
+            }
+
+            for b in &mut active_builds {
+                resolve_and_expand_package_macros(b, &dbs_cfg.distgit.dest, Some(&mut conn));
+            }
+            for b in &mut recent_builds {
+                resolve_and_expand_package_macros(b, &dbs_cfg.distgit.dest, Some(&mut conn));
+            }
+        } else {
+            for b in &mut active_builds {
+                resolve_and_expand_package_macros(b, &dbs_cfg.distgit.dest, None);
+            }
+            for b in &mut recent_builds {
+                resolve_and_expand_package_macros(b, &dbs_cfg.distgit.dest, None);
             }
         }
 
@@ -418,9 +436,14 @@ impl MonitorModel {
                 let worker_str = b.worker_id.map(|w| format!("Worker-{}", w)).unwrap_or_else(|| "default".to_string());
                 let status_badge = render_badge("BUILDING", BadgeKind::Warning);
                 let log = b.build_log_path.as_deref().unwrap_or("-");
+                let display_version = if b.version.contains('%') {
+                    crate::distgit::spec::expand_macros(&b.version, &std::collections::HashMap::new())
+                } else {
+                    b.version.clone()
+                };
                 lines.push(format!("  {:<24} {:<12} {:<10} {:<12} {}",
                     Style::new().bold().foreground(Palette::CYAN_LIGHT).render(&b.name),
-                    b.version,
+                    display_version,
                     worker_str,
                     status_badge,
                     log
@@ -455,9 +478,14 @@ impl MonitorModel {
                     "-".to_string()
                 };
 
+                let display_version = if b.version.contains('%') {
+                    crate::distgit::spec::expand_macros(&b.version, &std::collections::HashMap::new())
+                } else {
+                    b.version.clone()
+                };
                 lines.push(format!("  {:<24} {:<12} {:<12} {:<10} {:<10} {}",
                     b.name,
-                    b.version,
+                    display_version,
                     badge,
                     dur,
                     worker_str,
@@ -555,6 +583,68 @@ impl MonitorModel {
         }
 
         render_card("PostgreSQL Metadata & Build Records", &lines.join("\n"), card_w, true)
+    }
+}
+
+/// Resolves and expands unexpanded RPM macros in package version and release tags.
+///
+/// If `pkg.version` or `pkg.release` contains `%`, this function attempts to:
+/// 1. Locate the package's `.spec` file on disk (from `pkg.spec_file` or `<distgit_dir>/<name>/<name>.spec`)
+///    and parse it with [`crate::distgit::spec::parse_spec_file`] to get fully-evaluated metadata.
+/// 2. If the spec file is not on disk, evaluate through native [`crate::distgit::spec::expand_macros`].
+/// 3. If a database connection is provided, persist the clean expanded EVR tags back to PostgreSQL.
+pub fn resolve_and_expand_package_macros(
+    pkg: &mut Package,
+    distgit_dir: &Path,
+    conn: Option<&mut PgConnection>,
+) {
+    if !pkg.version.contains('%') && !pkg.release.contains('%') {
+        return;
+    }
+
+    let mut resolved_from_spec = false;
+    let candidate_paths = [
+        pkg.spec_file.as_ref().map(PathBuf::from),
+        Some(distgit_dir.join(&pkg.name).join(format!("{}.spec", pkg.name))),
+    ];
+
+    for candidate in candidate_paths.into_iter().flatten() {
+        if candidate.exists()
+            && let Ok(meta) = crate::distgit::spec::parse_spec_file(&candidate) {
+                if !meta.version.is_empty() && !meta.version.contains('%') {
+                    pkg.version = meta.version;
+                    resolved_from_spec = true;
+                }
+                if !meta.release.is_empty() && !meta.release.contains('%') {
+                    pkg.release = meta.release;
+                }
+                break;
+            }
+    }
+
+    if !resolved_from_spec && pkg.version.contains('%') {
+        let exp = crate::distgit::spec::expand_macros(&pkg.version, &std::collections::HashMap::new());
+        if !exp.is_empty() && !exp.contains('%') {
+            pkg.version = exp;
+        }
+    }
+
+    if pkg.release.contains('%') {
+        let exp = crate::distgit::spec::expand_macros(&pkg.release, &std::collections::HashMap::new());
+        if !exp.is_empty() && !exp.contains('%') {
+            pkg.release = exp;
+        }
+    }
+
+    if let Some(c) = conn {
+        let new_sourcerpm = Some(format!("{}-{}-{}.src.rpm", pkg.name, pkg.version, pkg.release));
+        let _ = diesel::update(package::table.filter(package::id.eq(pkg.id)))
+            .set((
+                package::version.eq(&pkg.version),
+                package::release.eq(&pkg.release),
+                package::sourcerpm.eq(&new_sourcerpm),
+            ))
+            .execute(c);
     }
 }
 

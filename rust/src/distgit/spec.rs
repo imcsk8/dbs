@@ -190,8 +190,154 @@ pub fn parse_spec_file(spec_path: &Path) -> Result<SpecMetadata> {
 
             Ok(meta)
         },
-        None => Err(eyre!("Failed to parse spec file: {}", spec_str)),
+        None => {
+            debug!("librpm Spec::parse failed for {}, attempting Tier 2 preamble fallback", spec_str);
+            parse_spec_preamble_fallback(spec_path, &ctx)
+        }
     }
+}
+
+/// Tier 2 fallback parser that extracts metadata and evaluates RPM macros directly from
+/// the spec preamble using `librpm::macro_context::MacroContext`.
+///
+/// Used when `librpm::build::Spec::parse` fails (e.g. missing `%include` auxiliary files).
+fn parse_spec_preamble_fallback(
+    spec_path: &Path,
+    ctx: &librpm::macro_context::MacroContext,
+) -> Result<SpecMetadata> {
+    let raw = match fs::read_to_string(spec_path) {
+        Ok(s) => s,
+        Err(e) => return Err(eyre!("Failed to read spec file {}: {}", spec_path.display(), e)),
+    };
+
+    let mut meta = SpecMetadata {
+        spec_path: Some(spec_path.to_path_buf()),
+        ..Default::default()
+    };
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+
+        // Skip comments and empty lines
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+
+        // Preamble ends when body sections start
+        if trimmed.starts_with("%description")
+            || trimmed.starts_with("%prep")
+            || trimmed.starts_with("%build")
+            || trimmed.starts_with("%install")
+            || trimmed.starts_with("%check")
+            || trimmed.starts_with("%clean")
+            || trimmed.starts_with("%files")
+            || trimmed.starts_with("%changelog")
+            || trimmed.starts_with("%package")
+        {
+            break;
+        }
+
+        // Process %define and %global directives
+        if trimmed.starts_with("%define") || trimmed.starts_with("%global") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let directive_len = parts[0].len();
+                let def = trimmed[directive_len..].trim();
+                let _ = ctx.define(def, 0);
+            }
+            continue;
+        }
+
+        // Process standard key: value tags
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let tag = k.trim().to_lowercase();
+            let raw_val = v.trim();
+            let expanded_val = ctx.expand(raw_val).unwrap_or_else(|_| raw_val.to_string());
+
+            let is_source_tag = tag == "source"
+                || (tag.starts_with("source") && tag["source".len()..].chars().all(|c| c.is_ascii_digit()));
+            let is_patch_tag = tag == "patch"
+                || (tag.starts_with("patch") && tag["patch".len()..].chars().all(|c| c.is_ascii_digit()));
+
+            match tag.as_str() {
+                "name" if meta.name.is_empty() => {
+                    meta.name = expanded_val.clone();
+                    let _ = ctx.define(&format!("name {}", expanded_val), 0);
+                }
+                "version" if meta.version.is_empty() => {
+                    meta.version = expanded_val.clone();
+                    let _ = ctx.define(&format!("version {}", expanded_val), 0);
+                }
+                "release" if meta.release.is_empty() => {
+                    meta.release = expanded_val.clone();
+                    let _ = ctx.define(&format!("release {}", expanded_val), 0);
+                }
+                "epoch" => {
+                    if let Ok(ep) = expanded_val.parse::<i32>() {
+                        meta.epoch = ep;
+                    }
+                }
+                "summary" if meta.summary.is_empty() => {
+                    meta.summary = expanded_val;
+                }
+                "license" if meta.license.is_empty() => {
+                    meta.license = expanded_val;
+                }
+                "url" if meta.url.is_empty() => {
+                    meta.url = expanded_val;
+                }
+                "buildrequires" => {
+                    for req in expanded_val.split([',', ' ']) {
+                        let cleaned = req.trim();
+                        if !cleaned.is_empty()
+                            && !cleaned.starts_with('>')
+                            && !cleaned.starts_with('=')
+                            && !cleaned.starts_with('<')
+                        {
+                            meta.build_requires.push(cleaned.to_string());
+                        }
+                    }
+                }
+                "requires" => {
+                    for req in expanded_val.split([',', ' ']) {
+                        let cleaned = req.trim();
+                        if !cleaned.is_empty()
+                            && !cleaned.starts_with('>')
+                            && !cleaned.starts_with('=')
+                            && !cleaned.starts_with('<')
+                        {
+                            meta.requires.push(cleaned.to_string());
+                        }
+                    }
+                }
+                "provides" => {
+                    for prov in expanded_val.split([',', ' ']) {
+                        let cleaned = prov.trim();
+                        if !cleaned.is_empty()
+                            && !cleaned.starts_with('>')
+                            && !cleaned.starts_with('=')
+                            && !cleaned.starts_with('<')
+                        {
+                            meta.provides.push(cleaned.to_string());
+                        }
+                    }
+                }
+                _ if is_source_tag && !expanded_val.is_empty() => {
+                    meta.sources.push(expanded_val);
+                }
+                _ if is_patch_tag && !expanded_val.is_empty() => {
+                    meta.patches.push(expanded_val);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if meta.name.is_empty() {
+        return Err(eyre!("Failed to extract package name from spec preamble: {}", spec_path.display()));
+    }
+
+    Ok(meta)
 }
 
 #[cfg(test)]
@@ -248,6 +394,23 @@ mod tests {
 
         let res4 = expand_macros("https://example.com/%name-%version.tar.xz", &macros);
         assert_eq!(res4, "https://example.com/pv-1.11.0.tar.xz");
+
+        // Test vim nested macro pattern: %{baseversion}.%{patchlevel}
+        let mut macros_vim = HashMap::new();
+        macros_vim.insert("baseversion".to_string(), "9.2".to_string());
+        macros_vim.insert("patchlevel".to_string(), "1119".to_string());
+        let res_vim = expand_macros("%{baseversion}.%{patchlevel}", &macros_vim);
+        assert_eq!(res_vim, "9.2.1119");
+
+        // Test systemd conditional macro pattern: %{?version_override}%{!?version_override:262}
+        let macros_empty = HashMap::new();
+        let res_sd_default = expand_macros("%{?version_override}%{!?version_override:262}", &macros_empty);
+        assert_eq!(res_sd_default, "262");
+
+        let mut macros_sd_override = HashMap::new();
+        macros_sd_override.insert("version_override".to_string(), "263~rc1".to_string());
+        let res_sd_override = expand_macros("%{?version_override}%{!?version_override:262}", &macros_sd_override);
+        assert_eq!(res_sd_override, "263~rc1");
     }
 
     #[test]
@@ -281,10 +444,6 @@ mod tests {
 
     #[test]
     fn test_librpm_spec_parsing() {
-        use librpm::build::{Spec, SpecFlags};
-
-        ensure_rpm_initialized();
-
         let mut temp_spec = NamedTempFile::new().unwrap();
         writeln!(temp_spec, "Name: test-pkg").unwrap();
         writeln!(temp_spec, "Version: 1.2.3").unwrap();
@@ -299,10 +458,10 @@ mod tests {
         writeln!(temp_spec, "%description").unwrap();
         writeln!(temp_spec, "This is the body description").unwrap();
 
-        let s1 = Spec::parse(temp_spec.path().to_str().unwrap(), SpecFlags::NONE, None).expect("failed s1");
-        assert_eq!(s1.source_header().name(), "test-pkg");
-        assert_eq!(s1.source_header().version(), "1.2.3");
-        assert!(s1.source_header().release().starts_with("4"));
+        let s1 = parse_spec_file(temp_spec.path()).expect("failed s1");
+        assert_eq!(s1.name, "test-pkg");
+        assert_eq!(s1.version, "1.2.3");
+        assert!(s1.release.starts_with("4"));
 
         if std::path::Path::new("/srv/dbs/tacos/rpm/pv/pv.spec").exists() {
             let meta_pv = parse_spec_file(std::path::Path::new("/srv/dbs/tacos/rpm/pv/pv.spec")).expect("failed to parse pv.spec");
@@ -317,5 +476,49 @@ mod tests {
             assert_eq!(meta_sd.version, "262");
             assert!(!meta_sd.sources.is_empty());
         }
+
+        if std::path::Path::new("/srv/dbs/tacos/rpm/vim/vim.spec").exists() {
+            let meta_vim = parse_spec_file(std::path::Path::new("/srv/dbs/tacos/rpm/vim/vim.spec")).expect("failed to parse vim.spec");
+            println!("VIM NAME: {}, VERSION: {}", meta_vim.name, meta_vim.version);
+            assert_eq!(meta_vim.name, "vim");
+            assert_eq!(meta_vim.version, "9.2.1119");
+        }
+    }
+
+    #[test]
+    fn test_tier2_preamble_fallback_with_missing_include() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "%define baseversion 9.2").unwrap();
+        writeln!(file, "%define patchlevel 1119").unwrap();
+        writeln!(file, "Name: vim-fallback").unwrap();
+        writeln!(file, "Version: %{{baseversion}}.%{{patchlevel}}").unwrap();
+        writeln!(file, "Release: 1%{{?dist}}").unwrap();
+        writeln!(file, "Summary: Vim text editor").unwrap();
+        writeln!(file, "License: Vim").unwrap();
+        writeln!(file, "%include /nonexistent/file/triggers.systemd").unwrap();
+        writeln!(file, "%description").unwrap();
+        writeln!(file, "Body text").unwrap();
+
+        let meta = parse_spec_file(file.path()).unwrap();
+        assert_eq!(meta.name, "vim-fallback");
+        assert_eq!(meta.version, "9.2.1119");
+        assert_eq!(meta.summary, "Vim text editor");
+    }
+
+    #[test]
+    fn test_tier2_preamble_fallback_systemd_macro() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "Name: systemd-fallback").unwrap();
+        writeln!(file, "Version: %{{?version_override}}%{{!?version_override:262}}").unwrap();
+        writeln!(file, "Release: 1%{{?dist}}").unwrap();
+        writeln!(file, "Summary: System and Service Manager").unwrap();
+        writeln!(file, "License: LGPL-2.1-or-later").unwrap();
+        writeln!(file, "%include /nonexistent/file/triggers.systemd").unwrap();
+        writeln!(file, "%description").unwrap();
+        writeln!(file, "Body text").unwrap();
+
+        let meta = parse_spec_file(file.path()).unwrap();
+        assert_eq!(meta.name, "systemd-fallback");
+        assert_eq!(meta.version, "262");
     }
 }

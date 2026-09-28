@@ -437,15 +437,53 @@ pub struct BuildCounts {
 }
 
 /// Updates or creates a package record to mark build execution as started (BUILDING).
+///
+/// If `spec_meta` is provided and contains expanded version/release tags,
+/// the database record is updated to ensure live monitor telemetry displays clean EVR values.
 pub fn record_build_start(
     conn: &mut PgConnection,
     pkg_name: &str,
     worker_id: Option<i32>,
     log_path: Option<&str>,
+    spec_meta: Option<&crate::distgit::spec::SpecMetadata>,
 ) -> Result<i32> {
+    let (meta_version, meta_release, meta_sourcerpm) = match spec_meta {
+        Some(m) if !m.version.is_empty() && !m.version.contains('%') => (
+            Some(m.version.clone()),
+            Some(m.release.clone()),
+            Some(format!("{}-{}-{}.src.rpm", m.name, m.version, m.release)),
+        ),
+        _ => (None, None, None),
+    };
+
     if let Ok(Some(existing)) = find_package_by_name(conn, pkg_name) {
+        let mut target_version = meta_version;
+        let mut target_release = meta_release;
+        let target_sourcerpm = meta_sourcerpm;
+
+        // Fallback: If version in database has unexpanded macros, attempt generic expansion
+        if target_version.is_none() && existing.version.contains('%') {
+            let exp = crate::distgit::spec::expand_macros(&existing.version, &std::collections::HashMap::new());
+            if !exp.is_empty() && !exp.contains('%') {
+                target_version = Some(exp);
+            }
+        }
+        if target_release.is_none() && existing.release.contains('%') {
+            let exp = crate::distgit::spec::expand_macros(&existing.release, &std::collections::HashMap::new());
+            if !exp.is_empty() && !exp.contains('%') {
+                target_release = Some(exp);
+            }
+        }
+
+        let ver = target_version.unwrap_or(existing.version);
+        let rel = target_release.unwrap_or(existing.release);
+        let src = target_sourcerpm.or(existing.sourcerpm);
+
         diesel::update(package::table.filter(package::id.eq(existing.id)))
             .set((
+                package::version.eq(ver),
+                package::release.eq(rel),
+                package::sourcerpm.eq(src),
                 package::build_status.eq(BuildStatus::BUILDING),
                 package::worker_id.eq(worker_id),
                 package::build_log_path.eq(log_path),
@@ -454,19 +492,27 @@ pub fn record_build_start(
             .execute(conn)?;
         Ok(existing.id)
     } else {
+        let (ver, rel, src) = match spec_meta {
+            Some(m) => (
+                m.version.clone(),
+                m.release.clone(),
+                Some(format!("{}-{}-{}.src.rpm", m.name, m.version, m.release)),
+            ),
+            None => ("0.0.0".to_string(), "1".to_string(), None),
+        };
         let new_pkg = NewPackage {
             name: pkg_name.to_string(),
-            epoch: 0,
-            version: "0.0.0".to_string(),
-            release: "1".to_string(),
+            epoch: spec_meta.map(|m| m.epoch).unwrap_or(0),
+            version: ver,
+            release: rel,
             architecture: 1,
             package_size: "0 MB".to_string(),
             file_size_bytes: 0,
             source: format!("{}.src.rpm", pkg_name),
             repository: "build".to_string(),
             summary: format!("Building package {}", pkg_name),
-            url: "https://localhost".to_string(),
-            license: "Unknown".to_string(),
+            url: spec_meta.map(|m| m.url.clone()).unwrap_or_else(|| "https://localhost".to_string()),
+            license: spec_meta.map(|m| m.license.clone()).unwrap_or_else(|| "Unknown".to_string()),
             description: format!("Building package {}", pkg_name),
             in_repo: Some(false),
             created: Some(false),
@@ -476,15 +522,92 @@ pub fn record_build_start(
             build_log_path: log_path.map(|s| s.to_string()),
             error_summary: None,
             worker_id,
-            sourcerpm: None,
+            sourcerpm: src,
             dist_git_url: None,
             dist_git_branch: None,
             dist_git_commit: None,
-            spec_file: None,
+            spec_file: spec_meta.and_then(|m| m.spec_path.as_ref().map(|p| p.display().to_string())),
         };
         let rec = insert_package(conn, &new_pkg)?;
         Ok(rec.id)
     }
+}
+
+/// Reconciles and expands unexpanded RPM macros across catalog packages in the database.
+///
+/// Scans the database for packages where `version` or `release` contains unexpanded `%` macros,
+/// locates their `.spec` file on disk within `distgit_dir` (or `spec_file`), extracts evaluated
+/// metadata via [`crate::distgit::spec::parse_spec_file`], and updates the persisted package records.
+pub fn reconcile_all_package_macros(
+    conn: &mut PgConnection,
+    distgit_dir: &std::path::Path,
+) -> Result<usize> {
+    let pkgs = match package::table
+        .filter(package::version.like("%\\%%").or(package::release.like("%\\%%")))
+        .load::<Package>(conn)
+    {
+        Ok(records) => records,
+        Err(e) => return Err(eyre!("Failed to query packages with unexpanded macros: {}", e)),
+    };
+
+    let mut updated_count = 0;
+    for pkg in pkgs {
+        let mut new_ver = pkg.version.clone();
+        let mut new_rel = pkg.release.clone();
+
+        // 1. Try resolving against spec file on disk
+        let candidate_paths = [
+            pkg.spec_file.as_ref().map(std::path::PathBuf::from),
+            Some(distgit_dir.join(&pkg.name).join(format!("{}.spec", pkg.name))),
+        ];
+
+        let mut resolved_from_spec = false;
+        for candidate in candidate_paths.into_iter().flatten() {
+            if candidate.exists()
+                && let Ok(meta) = crate::distgit::spec::parse_spec_file(&candidate) {
+                    if !meta.version.is_empty() && !meta.version.contains('%') {
+                        new_ver = meta.version;
+                        resolved_from_spec = true;
+                    }
+                    if !meta.release.is_empty() && !meta.release.contains('%') {
+                        new_rel = meta.release;
+                    }
+                    break;
+                }
+        }
+
+        // 2. Fallback to generic macro expansion if spec is unavailable
+        if !resolved_from_spec && new_ver.contains('%') {
+            let exp = crate::distgit::spec::expand_macros(&new_ver, &std::collections::HashMap::new());
+            if !exp.is_empty() && !exp.contains('%') {
+                new_ver = exp;
+            }
+        }
+        if new_rel.contains('%') {
+            let exp = crate::distgit::spec::expand_macros(&new_rel, &std::collections::HashMap::new());
+            if !exp.is_empty() && !exp.contains('%') {
+                new_rel = exp;
+            }
+        }
+
+        if new_ver != pkg.version || new_rel != pkg.release {
+            let new_sourcerpm = Some(format!("{}-{}-{}.src.rpm", pkg.name, new_ver, new_rel));
+            let update_res = diesel::update(package::table.filter(package::id.eq(pkg.id)))
+                .set((
+                    package::version.eq(&new_ver),
+                    package::release.eq(&new_rel),
+                    package::sourcerpm.eq(&new_sourcerpm),
+                ))
+                .execute(conn);
+
+            match update_res {
+                Ok(_) => updated_count += 1,
+                Err(e) => log::warn!("Failed to update reconciled package {}: {}", pkg.name, e),
+            }
+        }
+    }
+
+    Ok(updated_count)
 }
 
 /// Retrieves all active packages currently in BUILDING state.

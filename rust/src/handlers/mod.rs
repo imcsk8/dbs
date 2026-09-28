@@ -542,7 +542,14 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
                 let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                 let log_path = output_dir.join("rpmbuild.log");
                 if let Some(conn) = &mut db_conn {
-                    let _ = db::record_build_start(conn, name, Some(1), Some(&log_path.display().to_string()));
+                    let spec_meta = parse_spec_file(target).ok();
+                    let _ = db::record_build_start(
+                        conn,
+                        name,
+                        Some(1),
+                        Some(&log_path.display().to_string()),
+                        spec_meta.as_ref(),
+                    );
                 }
                 println!("\nBuilding {} on host with rpmbuild...", target.display());
                 let out = runner.build(target, &output_dir)?;
@@ -1632,6 +1639,17 @@ pub async fn handle_db(args: DbArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             println!(" Operating Systems: {}", status.os_count);
             println!(" Architectures:     {}", status.arch_count);
             println!(" Packages:          {}", status.package_count);
+            println!("===========================================================");
+        }
+
+        DbCommands::Reconcile { path } => {
+            let distgit_dir = path.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
+            println!("===========================================================");
+            println!(" DBS Database Macro Reconciliation");
+            println!(" Target Dist-Git Directory: {}", distgit_dir.display());
+            println!("===========================================================");
+            let updated = db::reconcile_all_package_macros(&mut conn, &distgit_dir)?;
+            println!("✓ Successfully reconciled {} package record(s) in PostgreSQL.", updated);
             println!("===========================================================");
         }
 

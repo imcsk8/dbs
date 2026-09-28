@@ -708,6 +708,13 @@ pub enum DbCommands {
         #[arg(long)]
         down: bool,
     },
+
+    /// Reconcile unexpanded RPM macros across catalog packages using dist-git specs.
+    Reconcile {
+        /// Optional path to dist-git directory containing spec files (defaults to config).
+        #[arg(short, long)]
+        path: Option<std::path::PathBuf>,
+    },
 }
 
 /// Arguments for the `config` subcommand.
