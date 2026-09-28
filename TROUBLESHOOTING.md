@@ -242,6 +242,30 @@ dbs retry /srv/dbs/tacos/rpm/vim/vim.spec
   1. Add `%global _lto_cflags %{nil}` to `/srv/dbs/tacos/rpm/<pkg>/<pkg>.spec` to disable LTO for this package.
   2. Or configure SMP parallelism: `dbs retry <pkg> --smp 16`.
 
+#### "No space left on device" in Mock tmpfs (`%doc` / `%install`)
+* **Symptom:**
+  ```text
+  cp: error copying '...': No space left on device
+  /var/tmp/rpm-tmp.XXXX: line 43: unexpected EOF while looking for matching `''
+  error: Bad exit status from /var/tmp/rpm-tmp.XXXX (%doc)
+  error: Directory not found: /builddir/build/BUILD/<pkg>/BUILDROOT/usr/share/licenses/<pkg> [(%doc)]
+  ```
+* **Diagnosis:** Mock's default `tmpfs_enable = True` plugin mounts an in-memory RAM disk capped at 50% of physical RAM (e.g. 64 GB on a 128 GB machine). Massive packages (such as GCC with 3-stage bootstrap, full debuginfo, LTO objects, and libstdc++ HTML Doxygen documentation) exceed this limit at the final `%doc` or `%install` stage.
+* **Remediation:**
+  1. **Hot-Resize an Active In-Progress Build:**
+     If a build is currently running and you don't want to lose hours of compilation progress, expand the tmpfs mount on the fly (requires sudo on host):
+     ```bash
+     sudo mount -o remount,size=100G /var/lib/mock/<profile>-<arch>-<uniqueext>/root
+     ```
+  2. **Permanent Fix (Disable tmpfs & Use High-Capacity NVMe):**
+     In `mock/templates/tacos-stable-x86_64.tpl` (and `tacos-rolling.tpl`), disable `tmpfs_enable` and point Mock to high-capacity storage (such as `/srv/dbs/mock` on the 2.5TB NVMe drive):
+     ```python
+     config_opts['plugin_conf']['tmpfs_enable'] = False
+     import os
+     if os.path.exists('/srv/dbs/mock'):
+         config_opts['basedir'] = '/srv/dbs/mock'
+     ```
+
 ---
 
 ### Category 4: Test Suite Failures (`%check`)
