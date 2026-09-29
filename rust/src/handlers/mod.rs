@@ -1943,49 +1943,76 @@ pub async fn handle_shell(args: ShellArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     }
 }
 
-/// Dispatches the `retry` subcommand to clean previous worker staging artifacts and rebuild a package.
+/// Dispatches the `retry` subcommand to clean previous worker staging artifacts and rebuild one or more packages.
 pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     let staging_dir = args.output_dir.clone().unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
     let distgit_dest = &dbs_cfg.distgit.dest;
-    let pkg_input = &args.package;
 
-    // Resolve target path (spec or src.rpm)
-    let target = match runner::resolve_package_target(pkg_input, distgit_dest) {
-        Ok(path) => path,
-        Err(_) => {
-            let as_path = PathBuf::from(pkg_input);
-            if as_path.exists() {
-                as_path
-            } else {
-                return Err(eyre!(
-                    "Could not resolve package '{}' in {} or current directory.",
-                    pkg_input,
-                    distgit_dest.display()
-                ));
-            }
+    // Resolve target paths (from --file or single package positional)
+    let targets: Vec<PathBuf> = if let Some(ref file_path) = args.file {
+        if !file_path.exists() {
+            return Err(eyre!("Retry packages file not found: {}", file_path.display()));
         }
+        runner::load_packages_from_file(file_path, distgit_dest)?
+    } else if let Some(ref pkg_input) = args.package {
+        let target = match runner::resolve_package_target(pkg_input, distgit_dest) {
+            Ok(path) => path,
+            Err(_) => {
+                let as_path = PathBuf::from(pkg_input);
+                if as_path.exists() {
+                    as_path
+                } else {
+                    return Err(eyre!(
+                        "Could not resolve package '{}' in {} or current directory.",
+                        pkg_input,
+                        distgit_dest.display()
+                    ));
+                }
+            }
+        };
+        vec![target]
+    } else {
+        return Err(eyre!(
+            "Please provide a package name (e.g. 'dbs retry gcc') or specify a packages file with '--file <FILE>'."
+        ));
     };
 
-    let pkg_stem = target.file_stem().and_then(|s| s.to_str()).unwrap_or("package");
+    if targets.is_empty() {
+        return Err(eyre!("No valid package targets found to retry."));
+    }
 
     println!("===========================================================");
     println!(" DBS Package Build Retry");
-    println!(" Target Package:    {}", pkg_stem);
-    println!(" Resolved Spec:     {}", target.display());
+    if let Some(ref file_path) = args.file {
+        println!(" Target Manifest:   {} ({} package(s))", file_path.display(), targets.len());
+    } else if let Some(ref pkg) = args.package {
+        println!(" Target Package:    {}", pkg);
+        println!(" Resolved Spec:     {}", targets[0].display());
+    }
     println!(" Staging Directory: {}", staging_dir.display());
     println!("===========================================================");
 
-    // Clean up previous failed staging worker directory
+    // Clean up previous failed staging worker directory for all retry targets
     if staging_dir.exists()
         && let Ok(entries) = fs::read_dir(&staging_dir) {
             let prefix = "worker-";
-            let suffix = format!("-{}", pkg_stem);
+            let stems: Vec<String> = targets
+                .iter()
+                .filter_map(|t| t.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string()))
+                .collect();
+
             for entry in entries.flatten() {
                 let fname = entry.file_name().to_string_lossy().to_string();
-                if fname.starts_with(prefix) && fname.ends_with(&suffix) {
-                    let worker_path = entry.path();
-                    println!("▶ Removing previous worker staging directory: {}", worker_path.display());
-                    let _ = fs::remove_dir_all(&worker_path);
+                if fname.starts_with(prefix) {
+                    for stem in &stems {
+                        let suffix = format!("-{}", stem);
+                        if fname.ends_with(&suffix) {
+                            let worker_path = entry.path();
+                            println!("▶ Removing previous worker staging directory: {}", worker_path.display());
+                            let _ = fs::remove_dir_all(&worker_path);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -2016,13 +2043,13 @@ pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         mock_root: args.mock_root,
         mock_config_dir: args.mock_config_dir,
         output_dir: args.output_dir,
-        concurrency: args.concurrency.or(Some(1)),
+        concurrency: args.concurrency,
         smp: args.smp,
         dynamic_repo: true,
         chain: false,
         continue_on_error: false,
         packages: None,
-        targets: vec![target],
+        targets,
         record_db: args.record_db,
         lookaside_dir: args.lookaside_dir,
         fetch_sources: true,
@@ -2470,6 +2497,46 @@ mod tests {
         assert!(!worker_bar.exists());
         assert!(!foo_rpm.exists());
         assert!(!bar_rpm.exists());
+    }
+
+    #[tokio::test]
+    async fn test_retry_requires_package_or_file() {
+        let (dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let args = RetryArgs {
+            package: None,
+            file: None,
+            mock_root: None,
+            mock_config_dir: None,
+            output_dir: None,
+            concurrency: None,
+            smp: None,
+            clean_chroot: false,
+            record_db: false,
+            lookaside_dir: None,
+        };
+        let res = handle_retry(args, &dbs_cfg).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Please provide a package name"));
+    }
+
+    #[tokio::test]
+    async fn test_retry_file_nonexistent() {
+        let (dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let args = RetryArgs {
+            package: None,
+            file: Some(PathBuf::from("/nonexistent/file_pkgs.txt")),
+            mock_root: None,
+            mock_config_dir: None,
+            output_dir: None,
+            concurrency: None,
+            smp: None,
+            clean_chroot: false,
+            record_db: false,
+            lookaside_dir: None,
+        };
+        let res = handle_retry(args, &dbs_cfg).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Retry packages file not found"));
     }
 }
 

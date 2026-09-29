@@ -809,7 +809,12 @@ pub struct ShellArgs {
 #[derive(Args, Debug, Clone)]
 pub struct RetryArgs {
     /// Package name or spec/SRPM path to retry building (e.g. gcc, /srv/dbs/tacos/rpm/gcc/gcc.spec).
-    pub package: String,
+    #[arg(required_unless_present = "file")]
+    pub package: Option<String>,
+
+    /// Path to a text file containing package names or spec paths to retry building (one per line).
+    #[arg(short = 'f', long = "file", visible_alias = "packages", short_alias = 'p', value_name = "FILE")]
+    pub file: Option<PathBuf>,
 
     /// Mock chroot configuration profile name or .cfg path (defaults to [chroot].profile in dbs.toml).
     #[arg(short = 'r', long)]
