@@ -3,6 +3,7 @@
 //! Implements dispatch workflows for exploring, cloning, inspecting, building,
 //! DAG resolution, Mock chroot management, repository publishing, and database lifecycle.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1322,6 +1323,113 @@ pub async fn handle_lookaside(args: LookasideArgs, dbs_cfg: &DbsConfig) -> Resul
     Ok(())
 }
 
+/// Resolves a list of stage target entries into concrete package .spec paths.
+/// Supports comps groups/environments (e.g. `@workstation-product-environment`, `@core`),
+/// package manifest files (e.g. `packages.txt`), and direct package names or spec files.
+/// Also extracts `:nocheck` modifiers and registers them into `effective_nocheck_pkgs`.
+pub fn resolve_stage_targets(
+    stage_name: &str,
+    stage_pkgs: &[String],
+    distgit_path: &Path,
+    effective_nocheck_pkgs: &mut Vec<String>,
+    strict_single_targets: bool,
+) -> Result<Vec<PathBuf>> {
+    let mut spec_paths = Vec::new();
+    let mut seen_specs = HashSet::new();
+    let resolver = crate::comps::CompsResolver::new();
+
+    for target_entry in stage_pkgs {
+        let (clean_target, is_nc) = runner::extract_nocheck_modifier(target_entry);
+        let entry = crate::comps::extract_package_entry(clean_target);
+
+        if crate::comps::is_comps_target(entry) {
+            println!("\n▶ Resolving comps target in stage '{}': {}", stage_name, entry);
+            match resolver.resolve_comps_target(entry, false) {
+                Ok(pkgs) => {
+                    println!("✓ Expanded comps target '{}' into {} package(s)", entry, pkgs.len());
+                    let mut resolved_count = 0;
+                    for pkg in &pkgs {
+                        if is_nc && !effective_nocheck_pkgs.contains(pkg) {
+                            effective_nocheck_pkgs.push(pkg.clone());
+                        }
+                        if let Ok(spec) = runner::resolve_package_target(pkg, distgit_path) {
+                            if seen_specs.insert(spec.clone()) {
+                                spec_paths.push(spec);
+                            }
+                            resolved_count += 1;
+                        }
+                    }
+                    if resolved_count == 0 {
+                        eprintln!(
+                            "Notice: Stage '{}': Comps target '{}' resolved, but no member packages were found locally in {}",
+                            stage_name, entry, distgit_path.display()
+                        );
+                    } else {
+                        println!(
+                            "✓ Stage '{}': Resolved {}/{} packages from comps target '{}' in {}",
+                            stage_name, resolved_count, pkgs.len(), entry, distgit_path.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    return Err(eyre!(
+                        "Failed resolving comps target '{}' in stage '{}': {}",
+                        entry, stage_name, e
+                    ));
+                }
+            }
+        } else {
+            let as_path = Path::new(entry);
+            if as_path.is_file() {
+                let sub_targets = runner::load_packages_from_file(as_path, distgit_path)?;
+                for spec in sub_targets {
+                    if is_nc {
+                        let stem = spec
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or(entry);
+                        if !effective_nocheck_pkgs.contains(&stem.to_string()) {
+                            effective_nocheck_pkgs.push(stem.to_string());
+                        }
+                    }
+                    if seen_specs.insert(spec.clone()) {
+                        spec_paths.push(spec);
+                    }
+                }
+            } else {
+                if is_nc {
+                    let stem = Path::new(entry)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(entry);
+                    if !effective_nocheck_pkgs.contains(&stem.to_string()) {
+                        effective_nocheck_pkgs.push(stem.to_string());
+                    }
+                }
+                match runner::resolve_package_target(entry, distgit_path) {
+                    Ok(spec) => {
+                        if seen_specs.insert(spec.clone()) {
+                            spec_paths.push(spec);
+                        }
+                    }
+                    Err(e) => {
+                        if strict_single_targets {
+                            return Err(eyre!("Could not resolve package target '{}': {}", entry, e));
+                        } else {
+                            eprintln!(
+                                "Warning: stage '{}' skipping unresolved target '{}': {}",
+                                stage_name, target_entry, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(spec_paths)
+}
+
 /// Dispatches the `distro` subcommand to manage, build, publish, and serve distribution repositories.
 pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.action {
@@ -1467,35 +1575,13 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let mut tasks: Vec<StageTask> = Vec::new();
 
             if !targets.is_empty() {
-                let mut resolved_specs = Vec::new();
-                let resolver = crate::comps::CompsResolver::new();
-                for t in targets {
-                    let (clean_t, is_nc) = runner::extract_nocheck_modifier(&t);
-                    if is_nc {
-                        let stem = Path::new(clean_t).file_stem().and_then(|s| s.to_str()).unwrap_or(clean_t);
-                        effective_nocheck_pkgs.push(stem.to_string());
-                    }
-                    let entry = crate::comps::extract_package_entry(clean_t);
-                    if crate::comps::is_comps_target(entry) {
-                        println!("\n▶ Resolving comps target: {}", entry);
-                        match resolver.resolve_comps_target(entry, false) {
-                            Ok(pkgs) => {
-                                println!("✓ Expanded comps target '{}' into {} package(s)", entry, pkgs.len());
-                                for pkg in pkgs {
-                                    if let Ok(spec) = runner::resolve_package_target(&pkg, &path) {
-                                        resolved_specs.push(spec);
-                                    }
-                                }
-                            }
-                            Err(e) => return Err(eyre!("Failed resolving comps target '{}': {}", entry, e)),
-                        }
-                    } else {
-                        match runner::resolve_package_target(clean_t, &path) {
-                            Ok(spec) => resolved_specs.push(spec),
-                            Err(e) => return Err(eyre!("Could not resolve package target '{}': {}", entry, e)),
-                        }
-                    }
-                }
+                let resolved_specs = resolve_stage_targets(
+                    "cli-targets",
+                    &targets,
+                    &path,
+                    &mut effective_nocheck_pkgs,
+                    true,
+                )?;
 
                 if resolved_specs.is_empty() {
                     return Err(eyre!("No package targets resolved to build in {}", path.display()));
@@ -1522,23 +1608,15 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                         dbs_cfg.distro.stages.keys().collect::<Vec<_>>()
                     )),
                 };
-                let mut spec_paths = Vec::new();
-                for target_entry in stage_pkgs {
-                    let (clean_target, is_nc) = runner::extract_nocheck_modifier(target_entry);
-                    if is_nc {
-                        let stem = Path::new(clean_target).file_stem().and_then(|s| s.to_str()).unwrap_or(clean_target);
-                        effective_nocheck_pkgs.push(stem.to_string());
-                    }
-                    let as_path = Path::new(clean_target);
-                    if as_path.is_file() {
-                        let sub_targets = runner::load_packages_from_file(as_path, &path)?;
-                        spec_paths.extend(sub_targets);
-                    } else {
-                        match runner::resolve_package_target(clean_target, &path) {
-                            Ok(spec) => spec_paths.push(spec),
-                            Err(e) => eprintln!("Warning: stage '{}' skipping unresolved target '{}': {}", selected_stage, target_entry, e),
-                        }
-                    }
+                let spec_paths = resolve_stage_targets(
+                    &selected_stage,
+                    stage_pkgs,
+                    &path,
+                    &mut effective_nocheck_pkgs,
+                    false,
+                )?;
+                if spec_paths.is_empty() {
+                    eprintln!("Warning: Stage '{}' resolved 0 packages in {}", selected_stage, path.display());
                 }
                 tasks.push(StageTask {
                     name: selected_stage,
@@ -1555,24 +1633,13 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
                 for stage_name in ordered_names {
                     if let Some(stage_pkgs) = dbs_cfg.distro.stages.get(&stage_name) {
-                        let mut spec_paths = Vec::new();
-                        for target_entry in stage_pkgs {
-                            let (clean_target, is_nc) = runner::extract_nocheck_modifier(target_entry);
-                            if is_nc {
-                                let stem = Path::new(clean_target).file_stem().and_then(|s| s.to_str()).unwrap_or(clean_target);
-                                effective_nocheck_pkgs.push(stem.to_string());
-                            }
-                            let as_path = Path::new(clean_target);
-                            if as_path.is_file() {
-                                let sub_targets = runner::load_packages_from_file(as_path, &path)?;
-                                spec_paths.extend(sub_targets);
-                            } else {
-                                match runner::resolve_package_target(clean_target, &path) {
-                                    Ok(spec) => spec_paths.push(spec),
-                                    Err(e) => eprintln!("Warning: stage '{}' skipping unresolved target '{}': {}", stage_name, target_entry, e),
-                                }
-                            }
-                        }
+                        let spec_paths = resolve_stage_targets(
+                            &stage_name,
+                            stage_pkgs,
+                            &path,
+                            &mut effective_nocheck_pkgs,
+                            false,
+                        )?;
                         if !spec_paths.is_empty() {
                             tasks.push(StageTask {
                                 name: stage_name,
@@ -1609,6 +1676,9 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             if tasks.is_empty() {
                 return Err(eyre!("No package specifications or stages resolved to build."));
             }
+
+            effective_nocheck_pkgs.sort();
+            effective_nocheck_pkgs.dedup();
 
             // 3. Setup Mock runner engine
             let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
@@ -2910,6 +2980,125 @@ mod tests {
         };
         let res = handle_comps(args, &dbs_cfg).await;
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_stage_targets_packages_and_nocheck() {
+        let temp = tempdir().unwrap();
+        let distgit = temp.path();
+
+        let bash_dir = distgit.join("bash");
+        fs::create_dir_all(&bash_dir).unwrap();
+        let bash_spec = bash_dir.join("bash.spec");
+        fs::write(&bash_spec, "Name: bash\nVersion: 5.2\nRelease: 1\nSummary: test\nLicense: GPL\n").unwrap();
+
+        let git_dir = distgit.join("git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let git_spec = git_dir.join("git.spec");
+        fs::write(&git_spec, "Name: git\nVersion: 2.45\nRelease: 1\nSummary: test\nLicense: GPL\n").unwrap();
+
+        let mut nocheck_pkgs = Vec::new();
+        let stage_pkgs = vec![
+            "bash".to_string(),
+            "git:nocheck".to_string(),
+            "nonexistent-pkg".to_string(),
+        ];
+
+        let resolved = resolve_stage_targets(
+            "test-stage",
+            &stage_pkgs,
+            distgit,
+            &mut nocheck_pkgs,
+            false,
+        ).unwrap();
+
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.contains(&bash_spec));
+        assert!(resolved.contains(&git_spec));
+        assert!(nocheck_pkgs.contains(&"git".to_string()));
+        assert_eq!(nocheck_pkgs.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_stage_targets_comps_expansion() {
+        let temp = tempdir().unwrap();
+        let distgit = temp.path();
+
+        let bash_dir = distgit.join("bash");
+        fs::create_dir_all(&bash_dir).unwrap();
+        let bash_spec = bash_dir.join("bash.spec");
+        fs::write(&bash_spec, "Name: bash\nVersion: 5.2\nRelease: 1\nSummary: test\nLicense: GPL\n").unwrap();
+
+        let resolver = crate::comps::CompsResolver::new();
+        if resolver.resolve_comps_target("@core", false).is_ok() {
+            let mut nocheck_pkgs = Vec::new();
+            let stage_pkgs = vec!["@core:nocheck".to_string()];
+
+            let resolved = resolve_stage_targets(
+                "core-stage",
+                &stage_pkgs,
+                distgit,
+                &mut nocheck_pkgs,
+                false,
+            ).unwrap();
+
+            assert!(!resolved.is_empty());
+            assert!(resolved.contains(&bash_spec));
+            assert!(nocheck_pkgs.contains(&"bash".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_resolve_stage_targets_xml_target() {
+        let temp = tempdir().unwrap();
+        let distgit = temp.path();
+
+        let bash_dir = distgit.join("bash");
+        fs::create_dir_all(&bash_dir).unwrap();
+        let bash_spec = bash_dir.join("bash.spec");
+        fs::write(&bash_spec, "Name: bash\nVersion: 5.2\nRelease: 1\nSummary: test\nLicense: GPL\n").unwrap();
+
+        let mut nocheck_pkgs = Vec::new();
+        let stage_pkgs = vec![r#"<package name="bash"/>"#.to_string()];
+
+        let resolved = resolve_stage_targets(
+            "xml-stage",
+            &stage_pkgs,
+            distgit,
+            &mut nocheck_pkgs,
+            false,
+        ).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], bash_spec);
+    }
+
+    #[test]
+    fn test_resolve_stage_targets_file_manifest() {
+        let temp = tempdir().unwrap();
+        let distgit = temp.path();
+
+        let bash_dir = distgit.join("bash");
+        fs::create_dir_all(&bash_dir).unwrap();
+        let bash_spec = bash_dir.join("bash.spec");
+        fs::write(&bash_spec, "Name: bash\nVersion: 5.2\nRelease: 1\nSummary: test\nLicense: GPL\n").unwrap();
+
+        let manifest = temp.path().join("packages.txt");
+        fs::write(&manifest, "bash\n").unwrap();
+
+        let mut nocheck_pkgs = Vec::new();
+        let stage_pkgs = vec![manifest.to_str().unwrap().to_string()];
+
+        let resolved = resolve_stage_targets(
+            "file-stage",
+            &stage_pkgs,
+            distgit,
+            &mut nocheck_pkgs,
+            false,
+        ).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], bash_spec);
     }
 }
 
