@@ -169,6 +169,7 @@ pub fn list(conn: &mut PgConnection, args: &ListPkgArgs) -> Result<()> {
             .map(|d| format!("{:.1}s", d))
             .unwrap_or_else(|| "-".to_string());
         println!("  [{}] {}-{}-{} ({})", p.id, p.name, p.version, p.release, p.package_size);
+        println!("      Name:      {} ", p.name);
         println!("      Status:    {:?} (duration: {})", p.build_status, dur_str);
         println!("      Summary:   {}", p.summary);
         if let Some(err) = &p.error_summary {
