@@ -169,6 +169,8 @@ pub struct MockRunner {
     pub smp_cpus: Option<usize>,
     /// Whether to disable test execution in Mock and rpmbuild (`--nocheck`).
     pub nocheck: bool,
+    /// Specific package names configured to skip %check test execution.
+    pub nocheck_packages: Vec<String>,
 }
 
 impl MockRunner {
@@ -183,6 +185,7 @@ impl MockRunner {
             db_url: None,
             smp_cpus: None,
             nocheck: false,
+            nocheck_packages: Vec::new(),
         }
     }
 
@@ -236,6 +239,31 @@ impl MockRunner {
     pub fn with_nocheck(mut self, nocheck: bool) -> Self {
         self.nocheck = nocheck;
         self
+    }
+
+    /// Configures the specific list of package names that skip %check execution.
+    pub fn with_nocheck_packages<I, S>(mut self, packages: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.nocheck_packages = packages.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Adds a single package name to the %check skip exemption list.
+    pub fn add_nocheck_package(mut self, package: impl Into<String>) -> Self {
+        self.nocheck_packages.push(package.into());
+        self
+    }
+
+    /// Determines whether a package target or stem should skip %check tests.
+    pub fn is_nocheck_package(&self, pkg_name: &str) -> bool {
+        let clean = extract_nocheck_modifier(pkg_name).0;
+        self.nocheck_packages.iter().any(|p| {
+            let p_clean = extract_nocheck_modifier(p).0;
+            p_clean.eq_ignore_ascii_case(clean)
+        })
     }
 
     /// Builds a single package with worker isolation, automatic source acquisition, and two-stage Mock compilation.
@@ -382,8 +410,12 @@ impl MockRunner {
             rebuild_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
         }
 
-        if self.nocheck {
+        let should_skip_check = self.nocheck || self.is_nocheck_package(pkg_stem);
+        if should_skip_check {
             rebuild_cmd.arg("--nocheck");
+            if !self.nocheck {
+                println!("  [worker-{}] Skipping %check test suite for '{}' (matched nocheck_packages)", worker_id, pkg_stem);
+            }
         }
 
         rebuild_cmd.arg("--rebuild").arg(&target_srpm);
@@ -526,7 +558,11 @@ impl MockRunner {
             cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
         }
 
-        if self.nocheck {
+        let any_nocheck = self.nocheck || targets.iter().any(|t| {
+            let stem = t.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            self.is_nocheck_package(stem)
+        });
+        if any_nocheck {
             cmd.arg("--nocheck");
         }
 
@@ -687,6 +723,8 @@ impl BuildRunner for MockRunner {
 pub struct RpmbuildRunner {
     /// Whether to disable test execution in rpmbuild (`--nocheck`).
     pub nocheck: bool,
+    /// Specific package names configured to skip %check test execution.
+    pub nocheck_packages: Vec<String>,
 }
 
 impl RpmbuildRunner {
@@ -694,6 +732,25 @@ impl RpmbuildRunner {
     pub fn with_nocheck(mut self, nocheck: bool) -> Self {
         self.nocheck = nocheck;
         self
+    }
+
+    /// Configures the specific list of package names that skip %check execution.
+    pub fn with_nocheck_packages<I, S>(mut self, packages: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.nocheck_packages = packages.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Determines whether a package target or stem should skip %check tests.
+    pub fn is_nocheck_package(&self, pkg_name: &str) -> bool {
+        let clean = extract_nocheck_modifier(pkg_name).0;
+        self.nocheck_packages.iter().any(|p| {
+            let p_clean = extract_nocheck_modifier(p).0;
+            p_clean.eq_ignore_ascii_case(clean)
+        })
     }
 }
 
@@ -715,7 +772,7 @@ impl BuildRunner for RpmbuildRunner {
 
         let mut cmd = Command::new("rpmbuild");
         cmd.arg("-ba");
-        if self.nocheck {
+        if self.nocheck || self.is_nocheck_package(pkg_stem) {
             cmd.arg("--nocheck");
         }
         cmd.arg(format!("--define=_topdir {}", result_dir.display()));
@@ -1220,10 +1277,26 @@ pub fn find_spec_in_dir(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Extracts a clean package target name/path and whether the `:nocheck` modifier was present.
+///
+/// For example:
+/// - `"git:nocheck"` -> `("git", true)`
+/// - `"/srv/dbs/tacos/rpm/git/git.spec:nocheck"` -> `("/srv/dbs/tacos/rpm/git/git.spec", true)`
+/// - `"curl"` -> `("curl", false)`
+pub fn extract_nocheck_modifier(entry: &str) -> (&str, bool) {
+    if let Some(stripped) = entry.strip_suffix(":nocheck") {
+        (stripped, true)
+    } else {
+        (entry, false)
+    }
+}
+
 /// Resolves a package entry (which can be an explicit .spec / .src.rpm path, a directory,
 /// or a package name) to a valid spec or SRPM file path on disk.
+/// Automatically handles and ignores `:nocheck` modifiers if present.
 pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBuf> {
-    let p = Path::new(entry);
+    let (clean_entry, _) = extract_nocheck_modifier(entry);
+    let p = Path::new(clean_entry);
 
     // 1. Direct file path check (e.g. "/path/to/pkg.spec" or "specs/pkg.spec" or "pkg.src.rpm")
     if p.is_file() {
@@ -1794,5 +1867,30 @@ Error: Problem: package cannot be installed
         let runner_disabled = RpmbuildRunner::default().with_nocheck(false);
         assert!(!runner_disabled.nocheck);
     }
+
+    #[test]
+    fn test_extract_nocheck_modifier() {
+        assert_eq!(extract_nocheck_modifier("git:nocheck"), ("git", true));
+        assert_eq!(extract_nocheck_modifier("cockpit:nocheck"), ("cockpit", true));
+        assert_eq!(extract_nocheck_modifier("/path/to/git.spec:nocheck"), ("/path/to/git.spec", true));
+        assert_eq!(extract_nocheck_modifier("curl"), ("curl", false));
+        assert_eq!(extract_nocheck_modifier(""), ("", false));
+    }
+
+    #[test]
+    fn test_runner_nocheck_packages_exemption() {
+        let runner = MockRunner::new("test-profile")
+            .with_nocheck_packages(vec!["cockpit", "git:nocheck"]);
+
+        assert!(runner.is_nocheck_package("cockpit"));
+        assert!(runner.is_nocheck_package("git"));
+        assert!(runner.is_nocheck_package("GIT"));
+        assert!(!runner.is_nocheck_package("curl"));
+        assert!(!runner.is_nocheck_package("gcc"));
+
+        let runner_added = runner.add_nocheck_package("gnome-shell");
+        assert!(runner_added.is_nocheck_package("gnome-shell"));
+    }
 }
+
 

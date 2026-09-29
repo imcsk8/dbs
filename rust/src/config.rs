@@ -40,6 +40,10 @@ pub struct BuildConfig {
     /// Disable running test suites in Mock and rpmbuild (%check phase).
     #[serde(default)]
     pub nocheck: bool,
+
+    /// Specific package names that should always skip test suites (%check phase).
+    #[serde(default)]
+    pub nocheck_packages: Vec<String>,
 }
 
 fn default_skip_existing() -> bool {
@@ -51,6 +55,7 @@ impl Default for BuildConfig {
         Self {
             skip_existing: default_skip_existing(),
             nocheck: false,
+            nocheck_packages: Vec::new(),
         }
     }
 }
@@ -497,10 +502,12 @@ mod tests {
         [build]
         skip_existing = false
         nocheck = true
+        nocheck_packages = ["cockpit", "git"]
         "#;
         let parsed: DbsConfig = toml::from_str(toml_data).expect("Failed to parse TOML");
         assert!(!parsed.build.skip_existing);
         assert!(parsed.build.nocheck);
+        assert_eq!(parsed.build.nocheck_packages, vec!["cockpit", "git"]);
     }
 }
 

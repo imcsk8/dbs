@@ -555,6 +555,19 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
             let nocheck = args.nocheck || dbs_cfg.build.nocheck;
             runner = runner.with_nocheck(nocheck);
+
+            let mut effective_nocheck_pkgs = dbs_cfg.build.nocheck_packages.clone();
+            effective_nocheck_pkgs.extend(args.nocheck_packages.iter().cloned());
+            for target in &args.targets {
+                let target_str = target.to_string_lossy();
+                let (clean, is_nc) = runner::extract_nocheck_modifier(&target_str);
+                if is_nc {
+                    let stem = Path::new(clean).file_stem().and_then(|s| s.to_str()).unwrap_or(clean);
+                    effective_nocheck_pkgs.push(stem.to_string());
+                }
+            }
+            runner = runner.with_nocheck_packages(effective_nocheck_pkgs.clone());
+
             if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
             }
@@ -574,6 +587,8 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
             if runner.nocheck {
                 println!(" Test Execution:  disabled (--nocheck)");
+            } else if !effective_nocheck_pkgs.is_empty() {
+                println!(" Test Exemption:  %check skipped for {} package(s): {}", effective_nocheck_pkgs.len(), effective_nocheck_pkgs.join(", "));
             }
 
             if args.chain {
@@ -621,9 +636,23 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
 
         "rpmbuild" => {
             let nocheck = args.nocheck || dbs_cfg.build.nocheck;
-            let runner = RpmbuildRunner::default().with_nocheck(nocheck);
+            let mut effective_nocheck_pkgs = dbs_cfg.build.nocheck_packages.clone();
+            effective_nocheck_pkgs.extend(args.nocheck_packages.iter().cloned());
+            for target in &args.targets {
+                let target_str = target.to_string_lossy();
+                let (clean, is_nc) = runner::extract_nocheck_modifier(&target_str);
+                if is_nc {
+                    let stem = Path::new(clean).file_stem().and_then(|s| s.to_str()).unwrap_or(clean);
+                    effective_nocheck_pkgs.push(stem.to_string());
+                }
+            }
+            let runner = RpmbuildRunner::default()
+                .with_nocheck(nocheck)
+                .with_nocheck_packages(effective_nocheck_pkgs.clone());
             if runner.nocheck {
                 println!(" Test Execution:  disabled (--nocheck)");
+            } else if !effective_nocheck_pkgs.is_empty() {
+                println!(" Test Exemption:  %check skipped for {} package(s): {}", effective_nocheck_pkgs.len(), effective_nocheck_pkgs.join(", "));
             }
             for target in &args.targets {
                 let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
@@ -946,6 +975,10 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         mock_runner = mock_runner.with_smp_cpus(dbs_cfg.chroot.smp_cpus);
         let nocheck = args.nocheck || dbs_cfg.build.nocheck;
         mock_runner = mock_runner.with_nocheck(nocheck);
+        let mut effective_nocheck_pkgs = dbs_cfg.build.nocheck_packages.clone();
+        effective_nocheck_pkgs.extend(args.nocheck_packages.iter().cloned());
+        mock_runner = mock_runner.with_nocheck_packages(effective_nocheck_pkgs.clone());
+
         if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
         }
@@ -965,6 +998,8 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         }
         if mock_runner.nocheck {
             println!(" Test Execution:  disabled (--nocheck)");
+        } else if !effective_nocheck_pkgs.is_empty() {
+            println!(" Test Exemption:  %check skipped for {} package(s): {}", effective_nocheck_pkgs.len(), effective_nocheck_pkgs.join(", "));
         }
         let runner_arc = Arc::new(mock_runner);
 
@@ -1388,6 +1423,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             packages,
             break_cycles,
             nocheck,
+            nocheck_packages,
             targets,
         } => {
             let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
@@ -1405,6 +1441,9 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let record_db = record_db || dbs_cfg.database.record_db;
             let nocheck = nocheck || dbs_cfg.build.nocheck;
 
+            let mut effective_nocheck_pkgs = dbs_cfg.build.nocheck_packages.clone();
+            effective_nocheck_pkgs.extend(nocheck_packages);
+
             println!("===========================================================");
             println!(" DBS Distribution Build Orchestration");
             println!(" Target Distribution: {}", name);
@@ -1414,6 +1453,9 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" SMP Concurrency:     {} cores (-j{})", smp, smp);
             println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
             println!(" Test Execution:      {}", if nocheck { "Disabled (--nocheck)" } else { "Enabled (%check)" });
+            if !effective_nocheck_pkgs.is_empty() && !nocheck {
+                println!(" Test Exemptions:     {} package(s) skip %check: {}", effective_nocheck_pkgs.len(), effective_nocheck_pkgs.join(", "));
+            }
             println!("===========================================================");
 
             // 1. Determine execution plan: Direct targets vs Stages vs Manifest vs Full Directory
@@ -1428,7 +1470,12 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 let mut resolved_specs = Vec::new();
                 let resolver = crate::comps::CompsResolver::new();
                 for t in targets {
-                    let entry = crate::comps::extract_package_entry(&t);
+                    let (clean_t, is_nc) = runner::extract_nocheck_modifier(&t);
+                    if is_nc {
+                        let stem = Path::new(clean_t).file_stem().and_then(|s| s.to_str()).unwrap_or(clean_t);
+                        effective_nocheck_pkgs.push(stem.to_string());
+                    }
+                    let entry = crate::comps::extract_package_entry(clean_t);
                     if crate::comps::is_comps_target(entry) {
                         println!("\n▶ Resolving comps target: {}", entry);
                         match resolver.resolve_comps_target(entry, false) {
@@ -1443,7 +1490,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                             Err(e) => return Err(eyre!("Failed resolving comps target '{}': {}", entry, e)),
                         }
                     } else {
-                        match runner::resolve_package_target(entry, &path) {
+                        match runner::resolve_package_target(clean_t, &path) {
                             Ok(spec) => resolved_specs.push(spec),
                             Err(e) => return Err(eyre!("Could not resolve package target '{}': {}", entry, e)),
                         }
@@ -1477,12 +1524,17 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 };
                 let mut spec_paths = Vec::new();
                 for target_entry in stage_pkgs {
-                    let as_path = Path::new(target_entry);
+                    let (clean_target, is_nc) = runner::extract_nocheck_modifier(target_entry);
+                    if is_nc {
+                        let stem = Path::new(clean_target).file_stem().and_then(|s| s.to_str()).unwrap_or(clean_target);
+                        effective_nocheck_pkgs.push(stem.to_string());
+                    }
+                    let as_path = Path::new(clean_target);
                     if as_path.is_file() {
                         let sub_targets = runner::load_packages_from_file(as_path, &path)?;
                         spec_paths.extend(sub_targets);
                     } else {
-                        match runner::resolve_package_target(target_entry, &path) {
+                        match runner::resolve_package_target(clean_target, &path) {
                             Ok(spec) => spec_paths.push(spec),
                             Err(e) => eprintln!("Warning: stage '{}' skipping unresolved target '{}': {}", selected_stage, target_entry, e),
                         }
@@ -1505,12 +1557,17 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                     if let Some(stage_pkgs) = dbs_cfg.distro.stages.get(&stage_name) {
                         let mut spec_paths = Vec::new();
                         for target_entry in stage_pkgs {
-                            let as_path = Path::new(target_entry);
+                            let (clean_target, is_nc) = runner::extract_nocheck_modifier(target_entry);
+                            if is_nc {
+                                let stem = Path::new(clean_target).file_stem().and_then(|s| s.to_str()).unwrap_or(clean_target);
+                                effective_nocheck_pkgs.push(stem.to_string());
+                            }
+                            let as_path = Path::new(clean_target);
                             if as_path.is_file() {
                                 let sub_targets = runner::load_packages_from_file(as_path, &path)?;
                                 spec_paths.extend(sub_targets);
                             } else {
-                                match runner::resolve_package_target(target_entry, &path) {
+                                match runner::resolve_package_target(clean_target, &path) {
                                     Ok(spec) => spec_paths.push(spec),
                                     Err(e) => eprintln!("Warning: stage '{}' skipping unresolved target '{}': {}", stage_name, target_entry, e),
                                 }
@@ -1557,6 +1614,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
             mock_runner = mock_runner.with_smp_cpus(smp);
             mock_runner = mock_runner.with_nocheck(nocheck);
+            mock_runner = mock_runner.with_nocheck_packages(effective_nocheck_pkgs);
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }
@@ -2198,6 +2256,7 @@ pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         skip_existing: false,
         force: true,
         nocheck: args.nocheck,
+        nocheck_packages: args.nocheck_packages,
     };
 
     handle_build(build_args, dbs_cfg).await
@@ -2796,6 +2855,7 @@ mod tests {
             record_db: false,
             lookaside_dir: None,
             nocheck: false,
+            nocheck_packages: Vec::new(),
         };
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());
@@ -2817,6 +2877,7 @@ mod tests {
             record_db: false,
             lookaside_dir: None,
             nocheck: false,
+            nocheck_packages: Vec::new(),
         };
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());

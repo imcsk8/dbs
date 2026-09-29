@@ -108,12 +108,12 @@ system = [
 # Stage 3: Base utilities, networking, and server administration
 utilities = [
     "curl",
-    "git",
+    "git:nocheck",
     "zstd",
     "tar",
     "tmux",
     "vim",
-    "cockpit",
+    "cockpit:nocheck",
 ]
 
 # Stage 4: Graphical stack and desktop environment
@@ -128,7 +128,14 @@ desktop = [
 # Skip compiling packages if the exact version/release is already built (override with --force)
 skip_existing = true
 
-# Disable running test suites during package builds (%check phase)
+# Disable running test suites during package builds (%check phase) globally
 # nocheck = false
+
+# Specific packages that skip %check test suites due to container/hardware constraints in Mock
+nocheck_packages = [
+    "cockpit",
+    "git",
+]
+
 
 

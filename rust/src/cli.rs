@@ -308,6 +308,10 @@ pub struct BuildArgs {
     /// Disable running test suites in Mock and rpmbuild (%check phase).
     #[arg(long)]
     pub nocheck: bool,
+
+    /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
+    #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
+    pub nocheck_packages: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -380,6 +384,10 @@ pub struct DagArgs {
     /// Disable running test suites in Mock and rpmbuild (%check phase).
     #[arg(long)]
     pub nocheck: bool,
+
+    /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
+    #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
+    pub nocheck_packages: Vec<String>,
 }
 
 /// Arguments for the `chroot` subcommand.
@@ -653,6 +661,10 @@ pub enum DistroCommands {
         #[arg(long)]
         nocheck: bool,
 
+        /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
+        #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
+        nocheck_packages: Vec<String>,
+
         /// Target package specifications, names, or comps groups/environments to build (e.g. @core, @workstation-product-environment, bash).
         targets: Vec<String>,
     },
@@ -873,6 +885,10 @@ pub struct RetryArgs {
     /// Disable running test suites in Mock and rpmbuild (%check phase).
     #[arg(long)]
     pub nocheck: bool,
+
+    /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
+    #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
+    pub nocheck_packages: Vec<String>,
 }
 
 /// Arguments for the `clean` subcommand.
@@ -1055,6 +1071,19 @@ mod tests {
                 _ => panic!("Expected DistroCommands::Build"),
             },
             _ => panic!("Expected Commands::Distro"),
+        }
+    }
+
+    #[test]
+    fn test_cli_nocheck_packages_flags() {
+        let cli = Cli::try_parse_from([
+            "dbs", "retry", "--nocheck-pkg", "cockpit,git", "--nocheck-packages", "mutter", "cockpit"
+        ]).unwrap();
+        match cli.command {
+            Commands::Retry(args) => {
+                assert_eq!(args.nocheck_packages, vec!["cockpit", "git", "mutter"]);
+            }
+            _ => panic!("Expected Commands::Retry"),
         }
     }
 }
