@@ -83,6 +83,10 @@ pub enum Commands {
     #[command(alias = "delete-build", alias = "purge")]
     Clean(CleanArgs),
 
+    /// List failed packages with diagnostic error summaries (shorthand for `dbs pkg list --failed`).
+    #[command(alias = "list-failed")]
+    Failed(crate::cli::pkg::ListPkgArgs),
+
     /// Manage, view, and initialize DBS TOML configuration files.
     Config(ConfigArgs),
 }

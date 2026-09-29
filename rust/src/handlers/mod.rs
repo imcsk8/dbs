@@ -656,9 +656,14 @@ pub async fn handle_os(args: OsArgs, dbs_cfg: &DbsConfig) -> Result<()> {
 /// Dispatches the `pkg` subcommand.
 pub async fn handle_pkg(args: PkgArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     match args.command {
-        cli::pkg::PkgCommands::List => {
+        cli::pkg::PkgCommands::List(list_args) => {
             let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
-            cli::pkg::list(&mut conn, 50)?;
+            cli::pkg::list(&mut conn, &list_args)?;
+        }
+        cli::pkg::PkgCommands::Failed(mut list_args) => {
+            list_args.failed = true;
+            let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
+            cli::pkg::list(&mut conn, &list_args)?;
         }
         cli::pkg::PkgCommands::Add(add_args) => {
             let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
@@ -2334,6 +2339,13 @@ pub async fn handle_clean(args: CleanArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     println!("===========================================================");
 
     Ok(())
+}
+
+/// Dispatches the top-level `failed` subcommand.
+pub async fn handle_failed(mut args: cli::pkg::ListPkgArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    args.failed = true;
+    let mut conn = db::establish_connection_with_url(dbs_cfg.database.url.as_deref())?;
+    cli::pkg::list(&mut conn, &args)
 }
 
 #[cfg(test)]

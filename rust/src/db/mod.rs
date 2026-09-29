@@ -132,12 +132,28 @@ pub fn delete_distribution(conn: &mut PgConnection, distro_id: i32) -> Result<us
     delete_operating_system(conn, distro_id)
 }
 
-/// Queries packages from the package catalog with an optional limit.
-pub fn list_packages(conn: &mut PgConnection, limit: i64) -> Result<Vec<Package>> {
-    match package::table.limit(limit).load::<Package>(conn) {
+/// Queries packages from the package catalog with optional build status filter and limit.
+pub fn list_packages_with_status(
+    conn: &mut PgConnection,
+    status: Option<BuildStatus>,
+    limit: i64,
+) -> Result<Vec<Package>> {
+    let mut query = package::table.into_boxed();
+    if let Some(st) = status {
+        query = query.filter(package::build_status.eq(st));
+    }
+    if limit > 0 {
+        query = query.limit(limit);
+    }
+    match query.order(package::id.asc()).load::<Package>(conn) {
         Ok(records) => Ok(records),
         Err(e) => Err(eyre!("Failed to query package table: {}", e)),
     }
+}
+
+/// Queries packages from the package catalog with an optional limit.
+pub fn list_packages(conn: &mut PgConnection, limit: i64) -> Result<Vec<Package>> {
+    list_packages_with_status(conn, None, limit)
 }
 
 /// Looks up a package by its name.

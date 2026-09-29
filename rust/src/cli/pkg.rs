@@ -4,8 +4,10 @@ use clap::{Args, Subcommand};
 pub enum PkgCommands {
     /// Add a new package to the pipeline
     Add(AddPkgArgs),
-    /// List all available packages
-    List,
+    /// List packages in the database catalog with optional status filtering
+    List(ListPkgArgs),
+    /// List failed packages with diagnostic error summaries (shorthand for `dbs pkg list --failed`)
+    Failed(ListPkgArgs),
     /// Update an existing package
     Update(UpdatePkgArgs),
     /// Delete a package by its ID
@@ -18,6 +20,22 @@ pub enum PkgCommands {
     Build(BuildPkgArgs),
     /// Clean build artifacts (staging, repository RPMs, and database build state) for a package
     Clean(CleanPkgArgs),
+}
+
+/// Arguments for listing packages from the database catalog.
+#[derive(Args, Debug, Clone, Default)]
+pub struct ListPkgArgs {
+    /// Filter packages by build status (failed, success, building, pending, skipped)
+    #[arg(short = 's', long)]
+    pub status: Option<String>,
+
+    /// Show only failed packages (shorthand for --status failed)
+    #[arg(short = 'f', long)]
+    pub failed: bool,
+
+    /// Maximum number of packages to return (defaults to 50, use 0 for unlimited)
+    #[arg(short = 'l', long, default_value = "50")]
+    pub limit: i64,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -97,22 +115,65 @@ use crate::db;
 use crate::models::NewPackage;
 use crate::types::BuildStatus;
 
-/// Lists packages stored in the database catalog.
-pub fn list(conn: &mut PgConnection, limit: i64) -> Result<()> {
-    let packages = db::list_packages(conn, limit)?;
+/// Resolves the optional `BuildStatus` filter from `ListPkgArgs`.
+pub fn resolve_filter_status(args: &ListPkgArgs) -> Result<Option<BuildStatus>> {
+    if args.failed {
+        Ok(Some(BuildStatus::FAILED))
+    } else if let Some(ref st) = args.status {
+        match st.to_uppercase().as_str() {
+            "FAILED" | "FAIL" => Ok(Some(BuildStatus::FAILED)),
+            "SUCCESS" | "OK" => Ok(Some(BuildStatus::SUCCESS)),
+            "BUILDING" | "BUILD" => Ok(Some(BuildStatus::BUILDING)),
+            "PENDING" => Ok(Some(BuildStatus::PENDING)),
+            "SKIPPED" => Ok(Some(BuildStatus::SKIPPED)),
+            other => Err(eyre::eyre!(
+                "Unknown build status '{}'. Valid statuses: failed, success, building, pending, skipped",
+                other
+            )),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Lists packages stored in the database catalog with optional status filtering.
+pub fn list(conn: &mut PgConnection, args: &ListPkgArgs) -> Result<()> {
+    let effective_status = resolve_filter_status(args)?;
+
+    let packages = match db::list_packages_with_status(conn, effective_status, args.limit) {
+        Ok(pkgs) => pkgs,
+        Err(e) => return Err(eyre::eyre!("Failed to retrieve packages: {}", e)),
+    };
+
     if packages.is_empty() {
-        println!("No packages found in database catalog.");
+        if let Some(st) = effective_status {
+            println!("No packages with status {:?} found in database catalog.", st);
+        } else {
+            println!("No packages found in database catalog.");
+        }
         return Ok(());
     }
 
+    let title = match effective_status {
+        Some(BuildStatus::FAILED) => format!("DBS Failed Packages (Database - {} records)", packages.len()),
+        Some(st) => format!("DBS Packages [Status: {:?}] (Database - {} records)", st, packages.len()),
+        None => format!("DBS Package Catalog (Database - top {} records)", packages.len()),
+    };
+
     println!("===========================================================");
-    println!(" DBS Package Catalog (Database - top {} records)", packages.len());
+    println!(" {}", title);
     println!("===========================================================");
     for p in packages {
-        let dur_str = p.build_duration_seconds.map(|d| format!("{:.1}s", d)).unwrap_or_else(|| "-".to_string());
+        let dur_str = p
+            .build_duration_seconds
+            .map(|d| format!("{:.1}s", d))
+            .unwrap_or_else(|| "-".to_string());
         println!("  [{}] {}-{}-{} ({})", p.id, p.name, p.version, p.release, p.package_size);
         println!("      Status:    {:?} (duration: {})", p.build_status, dur_str);
         println!("      Summary:   {}", p.summary);
+        if let Some(err) = &p.error_summary {
+            println!("      Failure:   {}", err);
+        }
         if let Some(log) = &p.build_log_path {
             println!("      Build Log: {}", log);
         }
@@ -176,5 +237,63 @@ pub fn delete(conn: &mut PgConnection, id: i32) -> Result<()> {
         println!("Package ID {} not found.", id);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_filter_status_default() {
+        let args = ListPkgArgs::default();
+        let res = resolve_filter_status(&args).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn test_resolve_filter_status_failed_flag() {
+        let args = ListPkgArgs {
+            failed: true,
+            status: None,
+            limit: 50,
+        };
+        let res = resolve_filter_status(&args).unwrap();
+        assert_eq!(res, Some(BuildStatus::FAILED));
+    }
+
+    #[test]
+    fn test_resolve_filter_status_by_name() {
+        let cases = [
+            ("failed", BuildStatus::FAILED),
+            ("FAIL", BuildStatus::FAILED),
+            ("success", BuildStatus::SUCCESS),
+            ("OK", BuildStatus::SUCCESS),
+            ("building", BuildStatus::BUILDING),
+            ("pending", BuildStatus::PENDING),
+            ("skipped", BuildStatus::SKIPPED),
+        ];
+
+        for (input, expected) in cases {
+            let args = ListPkgArgs {
+                failed: false,
+                status: Some(input.to_string()),
+                limit: 50,
+            };
+            let res = resolve_filter_status(&args).unwrap();
+            assert_eq!(res, Some(expected), "Testing status '{}'", input);
+        }
+    }
+
+    #[test]
+    fn test_resolve_filter_status_invalid() {
+        let args = ListPkgArgs {
+            failed: false,
+            status: Some("unknown_status".to_string()),
+            limit: 50,
+        };
+        let res = resolve_filter_status(&args);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Unknown build status"));
+    }
 }
 
