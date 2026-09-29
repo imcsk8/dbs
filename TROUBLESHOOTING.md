@@ -139,6 +139,161 @@ dbs clean --all                 # Wipe all worker staging directories and reset 
 
 ---
 
+### 2.5 Comps Environments & Groups (`@workstation-product-environment`, `@core`)
+
+DBS provides native support for Fedora / ELN / TacOS comps environments and groups everywhere in the CLI:
+
+#### 1. Inspect Environments and Groups
+Inspect constituent groups, package metrics (mandatory, default, optional), and check which packages are already present in your local dist-git repository (`/srv/dbs/tacos/rpm`) vs missing:
+```bash
+# Inspect the GNOME Workstation environment definition from KIWI config.xml
+dbs comps inspect @workstation-product-environment -d /srv/dbs/tacos/rpm
+
+# Inspect the Core system group
+dbs comps inspect @core
+
+# Inspect with XML element syntax directly from KIWI config.xml
+dbs comps inspect '<package name="@workstation-product-environment"/>'
+```
+
+#### 2. Query & Export Comps Package Lists
+```bash
+# Output all mandatory and default package names in @core (one per line)
+dbs comps list-packages @core
+
+# Export packages from @workstation-product-environment missing locally in dist-git:
+dbs comps list-packages @workstation-product-environment --missing-only -d /srv/dbs/tacos/rpm > missing_workstation_pkgs.txt
+
+# List only packages already present in local dist-git:
+dbs comps list-packages @workstation-product-environment --present-only -d /srv/dbs/tacos/rpm
+
+# List all available comps environments and groups:
+dbs comps list
+dbs comps list --environments
+dbs comps list --groups
+```
+
+#### 3. Build Directly by Indicating Environments or Groups
+```bash
+# Compile all member packages in @core using Mock:
+dbs build @core -j 8
+
+# Build the complete workstation product environment with DAG dependency ordering:
+dbs distro build @workstation-product-environment
+
+# Build from manifest files containing @<group> or KIWI <package name="@..."/> elements:
+dbs distro build --packages tacos_package_list.txt
+```
+
+#### 4. Batch Clone or Retry Comps Targets
+```bash
+# Clone all packages belonging to a comps group from Fedora Rawhide:
+dbs distgit clone @core
+
+# Retry failed packages from a comps group:
+dbs retry @core -j 8
+```
+
+#### 5. Using Comps Environments in Distribution Build Stages (`[distro.stages]`)
+Comps environments and groups can be specified directly inside distribution stages in `tacos-distro.toml`:
+```toml
+[distro.stages]
+bootstrap = ["filesystem", "glibc", "bash", "rpm", "dnf5"]
+system = ["systemd", "util-linux", "pam", "openssl"]
+workstation = [
+    "@workstation-product-environment",
+]
+```
+When running `dbs distro build` or `dbs distro build --stage workstation`, DBS will automatically:
+1. Detect `@workstation-product-environment`.
+2. Expand the environment and its constituent groups into member packages via DNF5 comps.
+3. Discover all locally present member packages in the dist-git root (`/srv/dbs/tacos/rpm`).
+4. Resolve their `.spec` files and schedule them into the topological DAG pipeline for that stage.
+5. If `:nocheck` is appended (e.g. `"@workstation-product-environment:nocheck"`), all resolved member packages will automatically inherit `%check` test suite exemption.
+
+#### 6. Downloading & Synchronizing Missing Comps Packages
+When expanding a large comps target such as `@workstation-product-environment`, DBS checks which packages exist locally in your dist-git directory (`/srv/dbs/tacos/rpm`) and reports missing ones:
+```text
+✓ Expanded comps target '@workstation-product-environment' into 311 package(s)
+Notice: Stage 'workstation': Comps target '@workstation-product-environment' resolved, but no member packages were found locally in /srv/dbs/tacos/rpm
+```
+
+To download all missing packages into your local repository:
+
+##### Method A: Direct Comps Target Clone (Recommended)
+`dbs distgit clone` natively accepts comps targets. It resolves all constituent packages, skips existing ones, and clones the missing repositories from the upstream distro preset (`fedora-rawhide` or `centos-stream-10`):
+```bash
+./bin/dbs -c tacos-distro.toml distgit clone @workstation-product-environment
+```
+
+##### Method B: Pipelined Clone for Missing-Only Packages
+Export the exact missing package names and batch-clone them via `xargs`:
+```bash
+# 1. Export missing package list:
+./bin/dbs -c tacos-distro.toml comps list-packages @workstation-product-environment --missing-only -d /srv/dbs/tacos/rpm > missing_workstation_pkgs.txt
+
+# 2. Batch-clone all missing packages:
+cat missing_workstation_pkgs.txt | xargs ./bin/dbs -c tacos-distro.toml distgit clone
+```
+
+##### Method C: Pre-fetch Upstream Source Tarballs into Lookaside
+Once `.spec` and `sources` files are cloned, pre-fetch all upstream source archives into the lookaside cache in parallel so Mock workers start building without delays:
+```bash
+./bin/dbs -c tacos-distro.toml lookaside sync -j 16
+```
+
+#### 7. Why Is Only One Package (e.g. `firefox`) Building in a Stage?
+If `dbs distro build` or `dbs distro build --stage workstation` appears to only build a single package:
+1. **Missing Local Clones:** DBS only compiles packages present locally in `/srv/dbs/tacos/rpm`. If other workstation packages haven't been cloned yet, DBS only schedules the ones that exist. Use `./bin/dbs comps list-packages @workstation-product-environment --present-only -d /srv/dbs/tacos/rpm` to verify what is present.
+2. **Topological Layering (Kahn's BFS):** DBS compiles in layers based on `BuildRequires`. If a package is placed in a layer by itself (e.g. `Stage 'workstation' - Layer 0 (1 package(s))`), only 1 package will be built during that layer, even with `-j 16` concurrency. Subsequent layers start once that package finishes.
+3. **Artifact Caching (`skip_existing = true`):** If other packages in the stage already succeeded in earlier stages or runs, DBS skips them (`✓ Layer package ... is already built (repository). Skipping.`), leaving only unbuilt packages to compile.
+4. **Long Compilation Time:** Monolithic packages like `firefox` take 30–90+ minutes to build. Other fast packages in the same layer may have already finished in the first minute, leaving only the long-running package active.
+
+---
+
+### 2.6 Selective `%check` Test Exemptions (`nocheck_packages` & `:nocheck`)
+
+Certain packages (`cockpit`, `git`, desktop GUI components) have upstream test suites that fail in headless, isolated Mock chroot environments because they expect physical hardware temperature sensors (`/sys/class/hwmon`), active display servers, real TTYs, or loopback network bindings.
+
+Rather than disabling test suites globally with `--nocheck` (which would unsafely skip tests for `glibc`, `gcc`, `openssl`, and `systemd`), DBS supports granular exemptions:
+
+#### 1. Configuration in `tacos-distro.toml`
+Under the `[build]` table, list packages that should automatically skip `%check`:
+```toml
+[build]
+skip_existing = true
+
+# Packages that skip %check due to container/hardware constraints in Mock
+nocheck_packages = [
+    "cockpit",      # Requires host hardware temperature sensors (/sys/class/hwmon)
+    "git",          # Requires real TTY and network loopback configuration
+]
+```
+
+#### 2. Stage-Level `:nocheck` Syntax
+In `[distro.stages]`, append `:nocheck` to any package name:
+```toml
+[distro.stages]
+utilities = [
+    "curl",
+    "git:nocheck",
+    "zstd",
+    "cockpit:nocheck",
+]
+```
+
+#### 3. CLI Command Overrides
+Skip tests for specific packages during ad-hoc builds or retries:
+```bash
+# Retry with specific package exemptions:
+dbs retry --file failed.txt --nocheck-pkg cockpit,git -j 16
+
+# Build with selective exemptions:
+dbs distro build --nocheck-pkg cockpit,git -j 8
+```
+
+---
+
 ## 3. Failure Categories & Step-by-Step Recipes
 
 ### Category 0: Lookaside & Source Fetching Failures
