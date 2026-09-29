@@ -5,17 +5,109 @@
 //! for worker orchestration, dynamic local repository feedback, and sequential chain builds.
 pub mod gate;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use eyre::{eyre, Result};
 use tokio::sync::Semaphore;
 
 static REPO_LOCK: Mutex<()> = Mutex::new(());
+
+/// Maximum number of retry attempts when Mock encounters build root lock contention.
+const MAX_LOCK_RETRIES: usize = 5;
+
+/// Delay in seconds between lock contention retry attempts.
+const LOCK_RETRY_DELAY_SECS: u64 = 3;
+
+/// A RAII lease guard that holds an exclusive worker ID from the active concurrency pool.
+///
+/// When the lease is dropped (whether normally, on error, or during thread panic unwinding),
+/// the leased `worker_id` is automatically returned to the available worker pool.
+#[derive(Debug)]
+pub struct WorkerLease {
+    pool: Arc<Mutex<VecDeque<usize>>>,
+    worker_id: usize,
+}
+
+impl WorkerLease {
+    /// Creates a new worker lease with the specified ID and owning pool.
+    pub fn new(pool: Arc<Mutex<VecDeque<usize>>>, worker_id: usize) -> Self {
+        Self { pool, worker_id }
+    }
+
+    /// Returns the unique worker ID associated with this active lease.
+    pub fn id(&self) -> usize {
+        self.worker_id
+    }
+}
+
+impl Drop for WorkerLease {
+    fn drop(&mut self) {
+        match self.pool.lock() {
+            Ok(mut p) => p.push_back(self.worker_id),
+            Err(poisoned) => poisoned.into_inner().push_back(self.worker_id),
+        }
+    }
+}
+
+/// Core implementation for executing a Mock command with configurable retries and delay on lock contention.
+pub(crate) fn execute_mock_with_lock_retry_impl(
+    cmd: &mut Command,
+    pkg_name: &str,
+    worker_id: usize,
+    max_retries: usize,
+    retry_delay: Duration,
+) -> std::io::Result<std::process::Output> {
+    for attempt in 1..=max_retries {
+        let output = cmd.output()?;
+
+        if output.status.success() {
+            return Ok(output);
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let is_locked = stderr.contains("locked by another process")
+            || stdout.contains("locked by another process")
+            || stderr.contains("Build root is locked")
+            || stdout.contains("Build root is locked");
+
+        if is_locked && attempt < max_retries {
+            eprintln!(
+                "⚠️  [{}] Worker {} chroot is locked by another process (attempt {}/{}). Retrying in {:.1}s...",
+                pkg_name,
+                worker_id,
+                attempt,
+                max_retries,
+                retry_delay.as_secs_f32()
+            );
+            std::thread::sleep(retry_delay);
+            continue;
+        }
+
+        return Ok(output);
+    }
+    cmd.output()
+}
+
+/// Executes a Mock command, automatically retrying with backoff if the build root is locked by another process.
+fn execute_mock_with_lock_retry(
+    cmd: &mut Command,
+    pkg_name: &str,
+    worker_id: usize,
+) -> std::io::Result<std::process::Output> {
+    execute_mock_with_lock_retry_impl(
+        cmd,
+        pkg_name,
+        worker_id,
+        MAX_LOCK_RETRIES,
+        Duration::from_secs(LOCK_RETRY_DELAY_SECS),
+    )
+}
 
 /// Detailed diagnostic context extracted from build failure logs.
 #[derive(Debug, Clone)]
@@ -196,7 +288,10 @@ impl MockRunner {
             srpm_cmd.arg(format!("--sources={}", sources_dir.display()));
             srpm_cmd.arg("--symlink-dereference");
 
-            let srpm_output = srpm_cmd.output()?;
+            let srpm_output = match execute_mock_with_lock_retry(&mut srpm_cmd, pkg_stem, worker_id) {
+                Ok(out) => out,
+                Err(e) => return Err(eyre!("Failed to execute mock --buildsrpm for {}: {}", pkg_stem, e)),
+            };
             if !srpm_output.status.success() {
                 let duration_seconds = start_time.elapsed().as_secs_f64();
                 let runner_log_path = pkg_result_dir.join("dbs-runner.log");
@@ -280,7 +375,10 @@ impl MockRunner {
 
         rebuild_cmd.arg("--rebuild").arg(&target_srpm);
 
-        let rebuild_output = rebuild_cmd.output()?;
+        let rebuild_output = match execute_mock_with_lock_retry(&mut rebuild_cmd, pkg_stem, worker_id) {
+            Ok(out) => out,
+            Err(e) => return Err(eyre!("Failed to execute mock --rebuild for {}: {}", pkg_stem, e)),
+        };
         let duration_seconds = start_time.elapsed().as_secs_f64();
         let success = rebuild_output.status.success();
 
@@ -384,7 +482,10 @@ impl MockRunner {
                 srpm_cmd.arg(format!("--sources={}", sources_dir.display()));
                 srpm_cmd.arg("--symlink-dereference");
 
-                let srpm_output = srpm_cmd.output()?;
+                let srpm_output = match execute_mock_with_lock_retry(&mut srpm_cmd, pkg_stem, 1) {
+                    Ok(out) => out,
+                    Err(e) => return Err(eyre!("Failed to execute mock --buildsrpm for chain build ({}): {}", target.display(), e)),
+                };
                 if srpm_output.status.success() {
                     if let Some(srpm) = find_srpm_in_dir(&pkg_srpm_dir) {
                         srpms.push(srpm);
@@ -427,7 +528,10 @@ impl MockRunner {
         fs::create_dir_all(&local_repo)?;
         cmd.arg(format!("--localrepo={}", local_repo.display()));
 
-        let output = cmd.output()?;
+        let output = match execute_mock_with_lock_retry(&mut cmd, "chain-build", 1) {
+            Ok(out) => out,
+            Err(e) => return Err(eyre!("Failed to execute mock --chain: {}", e)),
+        };
         let duration_seconds = start_time.elapsed().as_secs_f64();
         let success = output.status.success();
 
@@ -477,7 +581,9 @@ impl MockRunner {
         concurrency: usize,
         dynamic_repo: bool,
     ) -> Vec<Result<BuildOutput>> {
-        let semaphore = Arc::new(Semaphore::new(concurrency));
+        let effective_concurrency = concurrency.max(1);
+        let semaphore = Arc::new(Semaphore::new(effective_concurrency));
+        let worker_pool = Arc::new(Mutex::new((1..=effective_concurrency).collect::<VecDeque<usize>>()));
         let local_rpms_dir = result_dir.join("rpms").join("x86_64");
         let _ = fs::create_dir_all(&local_rpms_dir);
 
@@ -487,15 +593,38 @@ impl MockRunner {
 
         let mut tasks = Vec::new();
 
-        for (idx, target) in targets.into_iter().enumerate() {
+        for target in targets {
             let sem = semaphore.clone();
+            let pool = worker_pool.clone();
             let runner = self.clone();
             let res_dir = result_dir.clone();
-            let worker_id = (idx % concurrency) + 1;
             let repo_dir = local_rpms_dir.clone();
 
+            let permit = match sem.acquire_owned().await {
+                Ok(p) => p,
+                Err(e) => {
+                    tasks.push(tokio::task::spawn_blocking(move || {
+                        Err(eyre!("Failed to acquire worker semaphore permit: {}", e))
+                    }));
+                    continue;
+                }
+            };
+
+            let worker_id = {
+                let mut guard = match pool.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                guard.pop_front().unwrap_or(1)
+            };
+
+            let lease = WorkerLease::new(pool, worker_id);
+
             let task = tokio::task::spawn_blocking(move || {
-                let _permit = sem.acquire_many(1);
+                let _permit = permit;
+                let _lease = lease;
+                let worker_id = _lease.id();
+
                 let out = runner.build_with_worker(&target, &res_dir, worker_id)?;
 
                 // If build succeeded, stage artifacts and update local repo for other workers
@@ -1430,5 +1559,132 @@ Error: Problem: package cannot be installed
         let d = diag.unwrap();
         assert_eq!(d.phase.as_deref(), Some("builddep / dnf"));
         assert!(d.context_lines.iter().any(|l| l.contains("nothing provides libsecret-devel")));
+    }
+
+    #[test]
+    fn test_worker_lease_lifecycle() {
+        let pool = Arc::new(Mutex::new(VecDeque::from([1, 2, 3])));
+        {
+            let id1 = pool.lock().unwrap().pop_front().unwrap();
+            let id2 = pool.lock().unwrap().pop_front().unwrap();
+            let lease1 = WorkerLease::new(pool.clone(), id1);
+            let lease2 = WorkerLease::new(pool.clone(), id2);
+            assert_eq!(lease1.id(), 1);
+            assert_eq!(lease2.id(), 2);
+            assert_eq!(pool.lock().unwrap().len(), 1);
+        }
+        let mut guard = pool.lock().unwrap();
+        assert_eq!(guard.len(), 3);
+        assert_eq!(guard.pop_front(), Some(3));
+        assert_eq!(guard.pop_front(), Some(2));
+        assert_eq!(guard.pop_front(), Some(1));
+    }
+
+    #[test]
+    fn test_worker_lease_concurrency_no_collisions() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let concurrency = 4;
+        let pool = Arc::new(Mutex::new((1..=concurrency).collect::<VecDeque<usize>>()));
+        let active = Arc::new(Mutex::new(HashSet::new()));
+        let collision_detected = Arc::new(AtomicBool::new(false));
+
+        let mut handles = Vec::new();
+        for _ in 0..20 {
+            let pool_clone = pool.clone();
+            let active_clone = active.clone();
+            let collision_clone = collision_detected.clone();
+
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..10 {
+                    let worker_id = {
+                        let mut guard = pool_clone.lock().unwrap();
+                        guard.pop_front()
+                    };
+                    if let Some(id) = worker_id {
+                        let _lease = WorkerLease::new(pool_clone.clone(), id);
+                        {
+                            let mut act = active_clone.lock().unwrap();
+                            if !act.insert(id) {
+                                collision_clone.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                        {
+                            let mut act = active_clone.lock().unwrap();
+                            act.remove(&id);
+                        }
+                    }
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(!collision_detected.load(Ordering::SeqCst), "Collision detected in leased worker IDs");
+        assert_eq!(pool.lock().unwrap().len(), concurrency);
+    }
+
+    #[test]
+    fn test_execute_mock_retry_non_lock_failure() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo 'regular compilation error' >&2; exit 1");
+        let start = Instant::now();
+        let res = execute_mock_with_lock_retry_impl(
+            &mut cmd,
+            "testpkg",
+            1,
+            5,
+            Duration::from_millis(50),
+        );
+        assert!(res.is_ok());
+        let output = res.unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("regular compilation error"));
+        assert!(start.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
+    fn test_execute_mock_retry_lock_recovery() {
+        let dir = tempdir().unwrap();
+        let counter_file = dir.path().join("attempt.txt");
+        let script = format!(
+            "if [ ! -f '{}' ]; then touch '{}'; echo 'ERROR: Build root is locked by another process' >&2; exit 1; else echo 'Build succeeded'; exit 0; fi",
+            counter_file.display(),
+            counter_file.display()
+        );
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&script);
+
+        let res = execute_mock_with_lock_retry_impl(
+            &mut cmd,
+            "testpkg",
+            1,
+            3,
+            Duration::from_millis(20),
+        );
+        assert!(res.is_ok());
+        let output = res.unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Build succeeded"));
+    }
+
+    #[test]
+    fn test_execute_mock_retry_lock_exhausted() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo 'ERROR: Build root is locked by another process' >&2; exit 1");
+
+        let res = execute_mock_with_lock_retry_impl(
+            &mut cmd,
+            "testpkg",
+            1,
+            2,
+            Duration::from_millis(10),
+        );
+        assert!(res.is_ok());
+        let output = res.unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("locked by another process"));
     }
 }
