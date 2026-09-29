@@ -553,6 +553,8 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             if let Some(smp) = smp_effective {
                 runner = runner.with_smp_cpus(smp);
             }
+            let nocheck = args.nocheck || dbs_cfg.build.nocheck;
+            runner = runner.with_nocheck(nocheck);
             if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
             }
@@ -569,6 +571,9 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
             if let Some(smp) = runner.smp_cpus {
                 println!(" SMP Concurrency: {} cores (-j{})", smp, smp);
+            }
+            if runner.nocheck {
+                println!(" Test Execution:  disabled (--nocheck)");
             }
 
             if args.chain {
@@ -615,7 +620,11 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
         }
 
         "rpmbuild" => {
-            let runner = RpmbuildRunner;
+            let nocheck = args.nocheck || dbs_cfg.build.nocheck;
+            let runner = RpmbuildRunner::default().with_nocheck(nocheck);
+            if runner.nocheck {
+                println!(" Test Execution:  disabled (--nocheck)");
+            }
             for target in &args.targets {
                 let name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
                 let log_path = output_dir.join("rpmbuild.log");
@@ -935,6 +944,8 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         let chroot_spec = mock_root.unwrap_or_else(|| "tacos-rolling-x86_64".to_string());
         let mut mock_runner = MockRunner::resolve(&chroot_spec, args.mock_config_dir.or_else(|| dbs_cfg.chroot.config_dir.clone()))?;
         mock_runner = mock_runner.with_smp_cpus(dbs_cfg.chroot.smp_cpus);
+        let nocheck = args.nocheck || dbs_cfg.build.nocheck;
+        mock_runner = mock_runner.with_nocheck(nocheck);
         if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
         }
@@ -951,6 +962,9 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         }
         if let Some(smp) = mock_runner.smp_cpus {
             println!(" SMP Concurrency: {} cores (-j{})", smp, smp);
+        }
+        if mock_runner.nocheck {
+            println!(" Test Execution:  disabled (--nocheck)");
         }
         let runner_arc = Arc::new(mock_runner);
 
@@ -1373,6 +1387,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             stages,
             packages,
             break_cycles,
+            nocheck,
             targets,
         } => {
             let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
@@ -1388,6 +1403,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let staging_dir = staging_dir.unwrap_or_else(|| dbs_cfg.distro.staging_dir.clone());
             let sign_key = sign_key.or_else(|| dbs_cfg.distro.sign_key.clone());
             let record_db = record_db || dbs_cfg.database.record_db;
+            let nocheck = nocheck || dbs_cfg.build.nocheck;
 
             println!("===========================================================");
             println!(" DBS Distribution Build Orchestration");
@@ -1397,6 +1413,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" Concurrency:         {}", concurrency);
             println!(" SMP Concurrency:     {} cores (-j{})", smp, smp);
             println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
+            println!(" Test Execution:      {}", if nocheck { "Disabled (--nocheck)" } else { "Enabled (%check)" });
             println!("===========================================================");
 
             // 1. Determine execution plan: Direct targets vs Stages vs Manifest vs Full Directory
@@ -1539,6 +1556,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             // 3. Setup Mock runner engine
             let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
             mock_runner = mock_runner.with_smp_cpus(smp);
+            mock_runner = mock_runner.with_nocheck(nocheck);
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }
@@ -2179,6 +2197,7 @@ pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         fetch_sources: true,
         skip_existing: false,
         force: true,
+        nocheck: args.nocheck,
     };
 
     handle_build(build_args, dbs_cfg).await
@@ -2776,6 +2795,7 @@ mod tests {
             clean_chroot: false,
             record_db: false,
             lookaside_dir: None,
+            nocheck: false,
         };
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());
@@ -2796,6 +2816,7 @@ mod tests {
             clean_chroot: false,
             record_db: false,
             lookaside_dir: None,
+            nocheck: false,
         };
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());

@@ -128,3 +128,7 @@ desktop = [
 # Skip compiling packages if the exact version/release is already built (override with --force)
 skip_existing = true
 
+# Disable running test suites during package builds (%check phase)
+# nocheck = false
+
+

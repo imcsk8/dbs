@@ -167,6 +167,8 @@ pub struct MockRunner {
     pub db_url: Option<String>,
     /// Optional number of SMP compilation threads passed to Mock (%_smp_mflags, %_smp_build_ncpus).
     pub smp_cpus: Option<usize>,
+    /// Whether to disable test execution in Mock and rpmbuild (`--nocheck`).
+    pub nocheck: bool,
 }
 
 impl MockRunner {
@@ -180,6 +182,7 @@ impl MockRunner {
             lookaside_dir: None,
             db_url: None,
             smp_cpus: None,
+            nocheck: false,
         }
     }
 
@@ -226,6 +229,12 @@ impl MockRunner {
     /// Sets the number of SMP compilation threads passed to Mock inside the chroot.
     pub fn with_smp_cpus(mut self, smp_cpus: usize) -> Self {
         self.smp_cpus = Some(smp_cpus);
+        self
+    }
+
+    /// Enables or disables skipping the %check test suite phase in Mock and rpmbuild (`--nocheck`).
+    pub fn with_nocheck(mut self, nocheck: bool) -> Self {
+        self.nocheck = nocheck;
         self
     }
 
@@ -373,6 +382,10 @@ impl MockRunner {
             rebuild_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
         }
 
+        if self.nocheck {
+            rebuild_cmd.arg("--nocheck");
+        }
+
         rebuild_cmd.arg("--rebuild").arg(&target_srpm);
 
         let rebuild_output = match execute_mock_with_lock_retry(&mut rebuild_cmd, pkg_stem, worker_id) {
@@ -511,6 +524,10 @@ impl MockRunner {
             cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
             cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
             cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
+        }
+
+        if self.nocheck {
+            cmd.arg("--nocheck");
         }
 
         for srpm in &srpms {
@@ -667,7 +684,18 @@ impl BuildRunner for MockRunner {
 
 /// Host-level rpmbuild runner executing `rpmbuild -ba` directly (for local debugging).
 #[derive(Debug, Clone, Default)]
-pub struct RpmbuildRunner;
+pub struct RpmbuildRunner {
+    /// Whether to disable test execution in rpmbuild (`--nocheck`).
+    pub nocheck: bool,
+}
+
+impl RpmbuildRunner {
+    /// Enables or disables skipping the %check phase in rpmbuild (`--nocheck`).
+    pub fn with_nocheck(mut self, nocheck: bool) -> Self {
+        self.nocheck = nocheck;
+        self
+    }
+}
 
 impl BuildRunner for RpmbuildRunner {
     fn name(&self) -> &'static str {
@@ -687,6 +715,9 @@ impl BuildRunner for RpmbuildRunner {
 
         let mut cmd = Command::new("rpmbuild");
         cmd.arg("-ba");
+        if self.nocheck {
+            cmd.arg("--nocheck");
+        }
         cmd.arg(format!("--define=_topdir {}", result_dir.display()));
         cmd.arg(input_path);
 
@@ -1745,4 +1776,23 @@ Error: Problem: package cannot be installed
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("locked by another process"));
     }
+
+    #[test]
+    fn test_mock_runner_nocheck_builder() {
+        let runner = MockRunner::new("test-profile").with_nocheck(true);
+        assert!(runner.nocheck);
+
+        let runner_disabled = MockRunner::new("test-profile").with_nocheck(false);
+        assert!(!runner_disabled.nocheck);
+    }
+
+    #[test]
+    fn test_rpmbuild_runner_nocheck_builder() {
+        let runner = RpmbuildRunner::default().with_nocheck(true);
+        assert!(runner.nocheck);
+
+        let runner_disabled = RpmbuildRunner::default().with_nocheck(false);
+        assert!(!runner_disabled.nocheck);
+    }
 }
+

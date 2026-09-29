@@ -36,6 +36,10 @@ pub struct BuildConfig {
     /// Skip compiling packages if the package version/release is already built.
     #[serde(default = "default_skip_existing")]
     pub skip_existing: bool,
+
+    /// Disable running test suites in Mock and rpmbuild (%check phase).
+    #[serde(default)]
+    pub nocheck: bool,
 }
 
 fn default_skip_existing() -> bool {
@@ -46,6 +50,7 @@ impl Default for BuildConfig {
     fn default() -> Self {
         Self {
             skip_existing: default_skip_existing(),
+            nocheck: false,
         }
     }
 }
@@ -485,4 +490,17 @@ mod tests {
         assert_eq!(parsed.distgit.new_top_origin.as_deref(), Some("https://codeberg.org/imcsk8/tacos"));
         assert_eq!(parsed.distgit.api_key.as_deref(), Some("secret_forge_token"));
     }
+
+    #[test]
+    fn test_deserialize_build_config_nocheck() {
+        let toml_data = r#"
+        [build]
+        skip_existing = false
+        nocheck = true
+        "#;
+        let parsed: DbsConfig = toml::from_str(toml_data).expect("Failed to parse TOML");
+        assert!(!parsed.build.skip_existing);
+        assert!(parsed.build.nocheck);
+    }
 }
+

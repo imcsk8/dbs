@@ -274,7 +274,7 @@ pub struct BuildArgs {
     pub chain: bool,
 
     /// Continue building remaining packages even if one fails in chain mode.
-    #[arg(short = 'c', long)]
+    #[arg(short = 'C', long)]
     pub continue_on_error: bool,
 
     /// Path to a file containing package names or spec paths to build (one per line).
@@ -304,6 +304,10 @@ pub struct BuildArgs {
     /// Force rebuild of package(s) even if the same version has already been built.
     #[arg(short = 'f', long)]
     pub force: bool,
+
+    /// Disable running test suites in Mock and rpmbuild (%check phase).
+    #[arg(long)]
+    pub nocheck: bool,
 }
 
 #[derive(Args, Debug)]
@@ -372,6 +376,10 @@ pub struct DagArgs {
     /// Automatically detect and break circular dependencies via base chroot fallback.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub break_cycles: bool,
+
+    /// Disable running test suites in Mock and rpmbuild (%check phase).
+    #[arg(long)]
+    pub nocheck: bool,
 }
 
 /// Arguments for the `chroot` subcommand.
@@ -641,6 +649,10 @@ pub enum DistroCommands {
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         break_cycles: bool,
 
+        /// Disable running test suites in Mock and rpmbuild (%check phase).
+        #[arg(long)]
+        nocheck: bool,
+
         /// Target package specifications, names, or comps groups/environments to build (e.g. @core, @workstation-product-environment, bash).
         targets: Vec<String>,
     },
@@ -857,6 +869,10 @@ pub struct RetryArgs {
     /// Path to local lookaside cache for instant BTRFS CoW staging of source tarballs.
     #[arg(long, env = "DBS_LOOKASIDE_DIR")]
     pub lookaside_dir: Option<PathBuf>,
+
+    /// Disable running test suites in Mock and rpmbuild (%check phase).
+    #[arg(long)]
+    pub nocheck: bool,
 }
 
 /// Arguments for the `clean` subcommand.
@@ -980,5 +996,68 @@ pub struct CompsListArgs {
     #[arg(long, conflicts_with = "environments")]
     pub groups: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_build_nocheck_flag() {
+        let cli = Cli::try_parse_from(["dbs", "build", "--nocheck", "test.spec"]).unwrap();
+        match cli.command {
+            Commands::Build(args) => {
+                assert!(args.nocheck);
+            }
+            _ => panic!("Expected Commands::Build"),
+        }
+
+        let cli_default = Cli::try_parse_from(["dbs", "build", "test.spec"]).unwrap();
+        match cli_default.command {
+            Commands::Build(args) => {
+                assert!(!args.nocheck);
+            }
+            _ => panic!("Expected Commands::Build"),
+        }
+    }
+
+    #[test]
+    fn test_cli_retry_nocheck_flag() {
+        let cli = Cli::try_parse_from(["dbs", "retry", "--nocheck", "cockpit"]).unwrap();
+        match cli.command {
+            Commands::Retry(args) => {
+                assert!(args.nocheck);
+                assert_eq!(args.package.as_deref(), Some("cockpit"));
+            }
+            _ => panic!("Expected Commands::Retry"),
+        }
+    }
+
+    #[test]
+    fn test_cli_dag_nocheck_flag() {
+        let cli = Cli::try_parse_from(["dbs", "dag", "--build", "--nocheck"]).unwrap();
+        match cli.command {
+            Commands::Dag(args) => {
+                assert!(args.build);
+                assert!(args.nocheck);
+            }
+            _ => panic!("Expected Commands::Dag"),
+        }
+    }
+
+    #[test]
+    fn test_cli_distro_build_nocheck_flag() {
+        let cli = Cli::try_parse_from(["dbs", "distro", "build", "--nocheck", "tacos"]).unwrap();
+        match cli.command {
+            Commands::Distro(args) => match args.action {
+                crate::cli::DistroCommands::Build { nocheck, .. } => {
+                    assert!(nocheck);
+                }
+                _ => panic!("Expected DistroCommands::Build"),
+            },
+            _ => panic!("Expected Commands::Distro"),
+        }
+    }
+}
+
 
 
