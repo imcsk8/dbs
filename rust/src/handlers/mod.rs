@@ -125,7 +125,14 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
                     match resolver.resolve_comps_target(entry, false) {
                         Ok(pkgs) => {
                             println!("✓ Expanded comps target '{}' into {} package(s) to clone", entry, pkgs.len());
-                            expanded_packages.extend(pkgs);
+                            let src_map = crate::comps::query_source_package_names(&pkgs, None);
+                            let mut seen = HashSet::new();
+                            for p in pkgs {
+                                let src = src_map.get(&p).cloned().unwrap_or(p);
+                                if seen.insert(src.clone()) {
+                                    expanded_packages.push(src);
+                                }
+                            }
                         }
                         Err(e) => return Err(eyre!("Failed to resolve comps target '{}': {}", entry, e)),
                     }
@@ -136,12 +143,35 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
 
             println!("Cloning {} package(s) from {} to {}...", expanded_packages.len(), distro, dest.display());
             for item in expanded_packages {
-                let (source_pkg, target_name) = if let Some((src, tgt)) = item.split_once(':') {
+                let (raw_source_pkg, raw_target_name) = if let Some((src, tgt)) = item.split_once(':') {
                     (src.trim(), tgt.trim())
                 } else if let Some(rename) = &rename_as {
                     (item.as_str(), rename.as_str())
                 } else {
                     (item.as_str(), item.as_str())
+                };
+
+                let canonical_source = if !raw_source_pkg.contains('/') && !raw_source_pkg.contains(':') && rename_as.is_none() {
+                    let map = crate::comps::query_source_package_names(&[raw_source_pkg.to_string()], None);
+                    if let Some(src) = map.get(raw_source_pkg) {
+                        if src != raw_source_pkg {
+                            println!("Note: Resolving subpackage '{}' to upstream repository '{}'", raw_source_pkg, src);
+                            src.clone()
+                        } else {
+                            raw_source_pkg.to_string()
+                        }
+                    } else {
+                        raw_source_pkg.to_string()
+                    }
+                } else {
+                    raw_source_pkg.to_string()
+                };
+
+                let source_pkg = canonical_source.as_str();
+                let target_name = if raw_target_name == raw_source_pkg {
+                    source_pkg
+                } else {
+                    raw_target_name
                 };
 
                 if target_name != source_pkg {
@@ -1353,6 +1383,12 @@ pub fn resolve_stage_targets(
                             effective_nocheck_pkgs.push(pkg.clone());
                         }
                         if let Ok(spec) = runner::resolve_package_target(pkg, distgit_path) {
+                            if is_nc {
+                                let stem = spec.file_stem().and_then(|s| s.to_str()).unwrap_or(pkg);
+                                if !effective_nocheck_pkgs.contains(&stem.to_string()) {
+                                    effective_nocheck_pkgs.push(stem.to_string());
+                                }
+                            }
                             if seen_specs.insert(spec.clone()) {
                                 spec_paths.push(spec);
                             }
@@ -1408,6 +1444,15 @@ pub fn resolve_stage_targets(
                 }
                 match runner::resolve_package_target(entry, distgit_path) {
                     Ok(spec) => {
+                        if is_nc {
+                            let resolved_stem = spec
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or(entry);
+                            if !effective_nocheck_pkgs.contains(&resolved_stem.to_string()) {
+                                effective_nocheck_pkgs.push(resolved_stem.to_string());
+                            }
+                        }
                         if seen_specs.insert(spec.clone()) {
                             spec_paths.push(spec);
                         }
@@ -2726,24 +2771,36 @@ pub async fn handle_comps(args: CompsArgs, dbs_cfg: &DbsConfig) -> Result<()> {
             let resolver = crate::comps::CompsResolver::new();
             let dest = list_args.dest.as_deref().unwrap_or(&dbs_cfg.distgit.dest);
 
-            if list_args.present_only || list_args.missing_only {
+            let packages = if list_args.present_only || list_args.missing_only {
                 let inspection = match resolver.inspect_target(&list_args.target, list_args.optional, Some(dest)) {
                     Ok(insp) => insp,
                     Err(e) => return Err(eyre!("Failed inspecting comps target '{}': {}", list_args.target, e)),
                 };
-                let list = if list_args.present_only {
+                if list_args.present_only {
                     inspection.local_present_packages
                 } else {
                     inspection.local_missing_packages
-                };
-                for p in list {
+                }
+            } else {
+                match resolver.resolve_comps_target(&list_args.target, list_args.optional) {
+                    Ok(pkgs) => pkgs,
+                    Err(e) => return Err(eyre!("Failed resolving comps target '{}': {}", list_args.target, e)),
+                }
+            };
+
+            if list_args.source {
+                let src_map = crate::comps::query_source_package_names(&packages, None);
+                let mut source_names = HashSet::new();
+                for pkg in packages {
+                    let src = src_map.get(&pkg).cloned().unwrap_or(pkg);
+                    source_names.insert(src);
+                }
+                let mut sorted: Vec<String> = source_names.into_iter().collect();
+                sorted.sort();
+                for p in sorted {
                     println!("{}", p);
                 }
             } else {
-                let packages = match resolver.resolve_comps_target(&list_args.target, list_args.optional) {
-                    Ok(pkgs) => pkgs,
-                    Err(e) => return Err(eyre!("Failed resolving comps target '{}': {}", list_args.target, e)),
-                };
                 for p in packages {
                     println!("{}", p);
                 }
@@ -3099,6 +3156,35 @@ mod tests {
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0], bash_spec);
+    }
+
+    #[test]
+    fn test_resolve_stage_targets_subpackage_resolution() {
+        let temp = tempdir().unwrap();
+        let distgit = temp.path();
+
+        let fw_dir = distgit.join("linux-firmware");
+        fs::create_dir_all(&fw_dir).unwrap();
+        let fw_spec = fw_dir.join("linux-firmware.spec");
+        let content = "Name: linux-firmware\nVersion: 2024\nRelease: 1\nSummary: fw\n\n%package -n intel-vsc-firmware\nSummary: intel\n";
+        fs::write(&fw_spec, content).unwrap();
+
+        let mut nocheck_pkgs = Vec::new();
+        let stage_pkgs = vec!["intel-vsc-firmware:nocheck".to_string()];
+
+        let resolved = resolve_stage_targets(
+            "subpkg-stage",
+            &stage_pkgs,
+            distgit,
+            &mut nocheck_pkgs,
+            false,
+        ).unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], fw_spec);
+        // Both the requested subpackage and the parent spec stem should be marked nocheck
+        assert!(nocheck_pkgs.contains(&"intel-vsc-firmware".to_string()));
+        assert!(nocheck_pkgs.contains(&"linux-firmware".to_string()));
     }
 }
 

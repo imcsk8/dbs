@@ -3,8 +3,8 @@
 //! Provides inspection, dependency expansion, and package target resolution
 //! for Fedora / ELN / TacOS comps environments and groups (e.g. `@workstation-product-environment`, `@core`).
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use eyre::{eyre, Result};
 
@@ -383,7 +383,7 @@ impl CompsResolver {
             all_packages.sort();
 
             let (present, missing) = match distgit_dest {
-                Some(dest) => partition_local_packages(&all_packages, dest),
+                Some(dest) => partition_local_packages(&all_packages, dest, self.releasever.as_deref()),
                 None => (Vec::new(), Vec::new()),
             };
 
@@ -434,7 +434,7 @@ impl CompsResolver {
             all_packages.sort();
 
             let (present, missing) = match distgit_dest {
-                Some(dest) => partition_local_packages(&all_packages, dest),
+                Some(dest) => partition_local_packages(&all_packages, dest, self.releasever.as_deref()),
                 None => (Vec::new(), Vec::new()),
             };
 
@@ -483,10 +483,248 @@ impl CompsResolver {
     }
 }
 
+/// Extracts package names, subpackage names, and provides capabilities from an RPM .spec file.
+pub fn extract_spec_provided_packages(spec_path: &Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(spec_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut provided = Vec::new();
+    let mut main_name = String::new();
+
+    // Pass 1: detect main package Name:
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.to_ascii_lowercase().starts_with("name:")
+            && let Some((_, val)) = trimmed.split_once(':') {
+                let name = val.split_whitespace().next().unwrap_or("").trim();
+                let clean_name = name.split('%').next().unwrap_or(name).trim();
+                if !clean_name.is_empty() {
+                    main_name = clean_name.to_string();
+                    provided.push(main_name.clone());
+                    break;
+                }
+            }
+    }
+
+    if main_name.is_empty()
+        && let Some(stem) = spec_path.file_stem().and_then(|s| s.to_str()) {
+            main_name = stem.to_string();
+            provided.push(main_name.clone());
+        }
+
+    // Pass 2: extract %package and Provides:
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with("%package") {
+            let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            if tokens.len() >= 2 {
+                if tokens[1] == "-n" {
+                    if tokens.len() >= 3 {
+                        let subpkg = tokens[2]
+                            .replace("%{name}", &main_name)
+                            .replace("%name", &main_name);
+                        let clean = subpkg.trim();
+                        if !clean.is_empty() && !clean.contains('%') {
+                            provided.push(clean.to_string());
+                        }
+                    }
+                } else if !tokens[1].starts_with('-') {
+                    let subname = tokens[1]
+                        .replace("%{name}", &main_name)
+                        .replace("%name", &main_name);
+                    let clean = subname.trim();
+                    if !clean.is_empty() && !clean.contains('%') {
+                        provided.push(format!("{}-{}", main_name, clean));
+                    }
+                }
+            }
+        } else if trimmed.to_ascii_lowercase().starts_with("provides:")
+            && let Some((_, val)) = trimmed.split_once(':') {
+                let cap = val.split_whitespace().next().unwrap_or("").trim();
+                let clean_cap = cap.split('%').next().unwrap_or(cap).trim();
+                if !clean_cap.is_empty()
+                    && !clean_cap.starts_with('/')
+                    && !clean_cap.contains('(')
+                    && !clean_cap.contains(')')
+                    && !clean_cap.contains('=')
+                    && !clean_cap.contains('<')
+                    && !clean_cap.contains('>')
+                {
+                    provided.push(clean_cap.to_string());
+                }
+            }
+    }
+
+    provided.dedup();
+    provided
+}
+
+/// Scans the local dist-git directory and specs directory, mapping all declared package names,
+/// subpackages, and provides capabilities to their parent .spec file path.
+pub fn scan_local_spec_providers(distgit_dest: &Path) -> HashMap<String, PathBuf> {
+    let mut providers = HashMap::new();
+
+    // Helper closure to index a spec file
+    let mut index_spec = |spec_path: PathBuf, dir_alias: Option<&str>| {
+        if !spec_path.is_file() {
+            return;
+        }
+        if let Some(stem) = spec_path.file_stem().and_then(|s| s.to_str()) {
+            providers.insert(stem.to_string(), spec_path.clone());
+        }
+        if let Some(alias) = dir_alias
+            && !alias.is_empty() {
+                providers.insert(alias.to_string(), spec_path.clone());
+            }
+        for pkg_name in extract_spec_provided_packages(&spec_path) {
+            providers.insert(pkg_name, spec_path.clone());
+        }
+    };
+
+    // 1. Scan direct subdirectories in distgit_dest
+    if distgit_dest.is_dir()
+        && let Ok(entries) = std::fs::read_dir(distgit_dest) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let spec_candidate = path.join(format!("{}.spec", dir_name));
+                    if spec_candidate.is_file() {
+                        index_spec(spec_candidate, Some(dir_name));
+                    } else if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub_entry in sub_entries.flatten() {
+                            let sub_path = sub_entry.path();
+                            if sub_path.extension().and_then(|e| e.to_str()) == Some("spec") {
+                                index_spec(sub_path, Some(dir_name));
+                                break;
+                            }
+                        }
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("spec") {
+                    index_spec(path, None);
+                }
+            }
+        }
+
+    // 2. Scan specs/ directory if present
+    let specs_dir = Path::new("specs");
+    if specs_dir.is_dir()
+        && let Ok(entries) = std::fs::read_dir(specs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let spec_candidate = path.join(format!("{}.spec", dir_name));
+                    if spec_candidate.is_file() {
+                        index_spec(spec_candidate, Some(dir_name));
+                    } else if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub_entry in sub_entries.flatten() {
+                            let sub_path = sub_entry.path();
+                            if sub_path.extension().and_then(|e| e.to_str()) == Some("spec") {
+                                index_spec(sub_path, Some(dir_name));
+                                break;
+                            }
+                        }
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("spec") {
+                    index_spec(path, None);
+                }
+            }
+        }
+
+    providers
+}
+
+/// Queries dnf5 repoquery to resolve binary package names to their canonical source package (SRPM) names.
+///
+/// Returns a map of `binary_package_name -> source_package_name`.
+/// Executes in batches of 100 packages using cache-only `-C` first, falling back to live repositories if needed.
+pub fn query_source_package_names(packages: &[String], releasever: Option<&str>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    if packages.is_empty() {
+        return map;
+    }
+
+    for chunk in packages.chunks(100) {
+        let mut cache_cmd = Command::new("dnf5");
+        cache_cmd.env("LC_ALL", "C");
+        cache_cmd.arg("-C");
+        cache_cmd.arg("-q");
+        if let Some(ver) = releasever {
+            cache_cmd.arg(format!("--releasever={}", ver));
+        }
+        cache_cmd.arg("repoquery");
+        cache_cmd.arg("--queryformat");
+        cache_cmd.arg("%{name}|%{source_name}\n");
+        for pkg in chunk {
+            cache_cmd.arg(pkg);
+        }
+
+        let output = match cache_cmd.output() {
+            Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+                String::from_utf8_lossy(&out.stdout).to_string()
+            }
+            _ => {
+                let mut live_cmd = Command::new("dnf5");
+                live_cmd.env("LC_ALL", "C");
+                live_cmd.arg("-q");
+                if let Some(ver) = releasever {
+                    live_cmd.arg(format!("--releasever={}", ver));
+                }
+                live_cmd.arg("repoquery");
+                live_cmd.arg("--queryformat");
+                live_cmd.arg("%{name}|%{source_name}\n");
+                for pkg in chunk {
+                    live_cmd.arg(pkg);
+                }
+                match live_cmd.output() {
+                    Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).to_string(),
+                    _ => String::new(),
+                }
+            }
+        };
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if let Some((bin_name, src_name)) = trimmed.split_once('|') {
+                let bin = bin_name.trim();
+                let src = src_name.trim();
+                if !bin.is_empty() && !src.is_empty() {
+                    map.insert(bin.to_string(), src.to_string());
+                }
+            }
+        }
+    }
+
+    map
+}
+
 /// Checks which packages exist in the local dist-git root directory.
-fn partition_local_packages(packages: &[String], distgit_dest: &Path) -> (Vec<String>, Vec<String>) {
+///
+/// Resolves both direct package names and binary subpackages:
+/// 1. Direct directory / spec file check.
+/// 2. Local spec inspection (identifying %package [-n] and Provides declarations).
+/// 3. DNF5 repoquery source package mapping: if a binary subpackage's source RPM
+///    (e.g. linux-firmware for intel-vsc-firmware) is present locally, the package is marked present.
+pub fn partition_local_packages(
+    packages: &[String],
+    distgit_dest: &Path,
+    releasever: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
     let mut present = Vec::new();
-    let mut missing = Vec::new();
+    let mut candidate_missing = Vec::new();
+
+    // 1. Scan local specs in distgit_dest to map all declared binary/subpackages to local specs
+    let local_providers = scan_local_spec_providers(distgit_dest);
 
     for pkg in packages {
         let pkg_dir = distgit_dest.join(pkg);
@@ -494,11 +732,44 @@ fn partition_local_packages(packages: &[String], distgit_dest: &Path) -> (Vec<St
         let direct_spec = Path::new("specs").join(format!("{}.spec", pkg));
         let in_specs_dir = Path::new("specs").join(pkg);
 
-        if pkg_dir.is_dir() || pkg_spec.is_file() || direct_spec.is_file() || in_specs_dir.is_dir() {
+        if pkg_dir.is_dir()
+            || pkg_spec.is_file()
+            || direct_spec.is_file()
+            || in_specs_dir.is_dir()
+            || local_providers.contains_key(pkg)
+        {
             present.push(pkg.clone());
         } else {
-            missing.push(pkg.clone());
+            candidate_missing.push(pkg.clone());
         }
+    }
+
+    if candidate_missing.is_empty() {
+        return (present, Vec::new());
+    }
+
+    // 2. For remaining candidates, query dnf5 to find their parent source package (SRPM) names
+    let src_map = query_source_package_names(&candidate_missing, releasever);
+    let mut missing = Vec::new();
+
+    for pkg in candidate_missing {
+        if let Some(src_name) = src_map.get(&pkg) {
+            let src_dir = distgit_dest.join(src_name);
+            let src_spec = distgit_dest.join(format!("{}.spec", src_name));
+            let direct_src_spec = Path::new("specs").join(format!("{}.spec", src_name));
+            let in_specs_src_dir = Path::new("specs").join(src_name);
+
+            if src_dir.is_dir()
+                || src_spec.is_file()
+                || direct_src_spec.is_file()
+                || in_specs_src_dir.is_dir()
+                || local_providers.contains_key(src_name)
+            {
+                present.push(pkg);
+                continue;
+            }
+        }
+        missing.push(pkg);
     }
 
     (present, missing)
@@ -798,5 +1069,73 @@ server-product-environment        Fedora Server Edition                       no
             assert!(packages.contains(&"bash".to_string()));
             assert!(packages.contains(&"coreutils".to_string()));
         }
+    }
+
+    #[test]
+    fn test_extract_spec_provided_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        let spec_file = temp.path().join("linux-firmware.spec");
+        let content = r#"
+Name:           linux-firmware
+Version:        20240909
+Release:        1%{?dist}
+Summary:        Firmware files used by the Linux kernel
+
+%package -n intel-vsc-firmware
+Summary:        Intel Visual Sensing Controller firmware
+Provides:       firmware(intel/vsc) = 1.0
+
+%package which
+Summary:        Which subpackage
+
+Provides:       kernel-firmware = %{version}
+Provides:       /lib/firmware/test.bin
+Provides:       bundled(gnulib)
+"#;
+        std::fs::write(&spec_file, content).unwrap();
+
+        let provided = extract_spec_provided_packages(&spec_file);
+        assert!(provided.contains(&"linux-firmware".to_string()));
+        assert!(provided.contains(&"intel-vsc-firmware".to_string()));
+        assert!(provided.contains(&"linux-firmware-which".to_string()));
+        assert!(provided.contains(&"kernel-firmware".to_string()));
+        // Ensure file paths and bundled() expressions are omitted
+        assert!(!provided.contains(&"/lib/firmware/test.bin".to_string()));
+        assert!(!provided.contains(&"bundled(gnulib)".to_string()));
+    }
+
+    #[test]
+    fn test_scan_and_partition_local_packages_subpackages() {
+        let temp = tempfile::tempdir().unwrap();
+        let distgit = temp.path();
+
+        // Create a subfolder with linux-firmware.spec providing intel-vsc-firmware
+        let fw_dir = distgit.join("linux-firmware");
+        std::fs::create_dir_all(&fw_dir).unwrap();
+        let spec_file = fw_dir.join("linux-firmware.spec");
+        let content = r#"
+Name:           linux-firmware
+Version:        20240909
+Release:        1
+
+%package -n intel-vsc-firmware
+Summary:        Intel VSC
+"#;
+        std::fs::write(&spec_file, content).unwrap();
+
+        let providers = scan_local_spec_providers(distgit);
+        assert_eq!(providers.get("intel-vsc-firmware"), Some(&spec_file));
+        assert_eq!(providers.get("linux-firmware"), Some(&spec_file));
+
+        // Test partitioning: intel-vsc-firmware must be present, missing-pkg must be missing
+        let pkgs = vec![
+            "intel-vsc-firmware".to_string(),
+            "nonexistent-pkg-xyz".to_string(),
+        ];
+        let (present, missing) = partition_local_packages(&pkgs, distgit, None);
+
+        assert!(present.contains(&"intel-vsc-firmware".to_string()));
+        assert!(!missing.contains(&"intel-vsc-firmware".to_string()));
+        assert!(missing.contains(&"nonexistent-pkg-xyz".to_string()));
     }
 }

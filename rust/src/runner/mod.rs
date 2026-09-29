@@ -1304,37 +1304,37 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
     }
 
     // 2. Check inside dist-git destination root (e.g. distgit_dest/pkg/pkg.spec or distgit_dest/pkg/*.spec)
-    let in_distgit_dir = distgit_dest.join(entry);
+    let in_distgit_dir = distgit_dest.join(clean_entry);
     if in_distgit_dir.is_dir()
         && let Some(spec) = find_spec_in_dir(&in_distgit_dir) {
             return Ok(spec);
         }
 
     // Check distgit_dest/pkg.spec directly
-    let in_distgit_spec = distgit_dest.join(format!("{}.spec", entry));
+    let in_distgit_spec = distgit_dest.join(format!("{}.spec", clean_entry));
     if in_distgit_spec.is_file() {
         return Ok(in_distgit_spec);
     }
 
     // 3. Check common relative directories (e.g. specs/pkg/pkg.spec, specs/pkg.spec, data/distgit/pkg/...)
-    let specs_dir = Path::new("specs").join(entry);
+    let specs_dir = Path::new("specs").join(clean_entry);
     if specs_dir.is_dir()
         && let Some(spec) = find_spec_in_dir(&specs_dir) {
             return Ok(spec);
         }
-    let specs_file = Path::new("specs").join(format!("{}.spec", entry));
+    let specs_file = Path::new("specs").join(format!("{}.spec", clean_entry));
     if specs_file.is_file() {
         return Ok(specs_file);
     }
 
-    let default_distgit = Path::new("data/distgit").join(entry);
+    let default_distgit = Path::new("data/distgit").join(clean_entry);
     if default_distgit.is_dir()
         && let Some(spec) = find_spec_in_dir(&default_distgit) {
             return Ok(spec);
         }
 
     // 4. Check if entry + .spec exists relative to current dir
-    let local_spec = PathBuf::from(format!("{}.spec", entry));
+    let local_spec = PathBuf::from(format!("{}.spec", clean_entry));
     if local_spec.is_file() {
         return Ok(local_spec);
     }
@@ -1347,7 +1347,25 @@ pub fn resolve_package_target(entry: &str, distgit_dest: &Path) -> Result<PathBu
         return Err(eyre!("Directory '{}' does not contain any .spec file", p.display()));
     }
 
+    // 6. Check if clean_entry is a subpackage or capability provided by any local .spec
+    let local_providers = crate::comps::scan_local_spec_providers(distgit_dest);
+    if let Some(spec) = local_providers.get(clean_entry) {
+        return Ok(spec.clone());
+    }
 
+    // 7. Check if clean_entry is a binary subpackage whose source RPM is known via repoquery
+    let src_map = crate::comps::query_source_package_names(&[clean_entry.to_string()], None);
+    if let Some(src_name) = src_map.get(clean_entry)
+        && src_name != clean_entry {
+            let src_dir = distgit_dest.join(src_name);
+            if src_dir.is_dir() && let Some(spec) = find_spec_in_dir(&src_dir) {
+                return Ok(spec);
+            }
+            let src_spec = distgit_dest.join(format!("{}.spec", src_name));
+            if src_spec.is_file() {
+                return Ok(src_spec);
+            }
+    }
 
     Err(eyre!(
         "Package or spec file '{}' not found (checked '{}' and '{}')",

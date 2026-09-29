@@ -226,14 +226,14 @@ To download all missing packages into your local repository:
 ./bin/dbs -c tacos-distro.toml distgit clone @workstation-product-environment
 ```
 
-##### Method B: Pipelined Clone for Missing-Only Packages
-Export the exact missing package names and batch-clone them via `xargs`:
+##### Method B: Pipelined Clone for Missing-Only Packages (`--source`)
+Export the exact missing source repository names using the `--source` (or `--src`) flag. This resolves binary subpackages (e.g. `intel-vsc-firmware`, `mesa-dri-drivers`) to their canonical dist-git repository names (`linux-firmware`, `mesa`), deduplicates them, and passes them cleanly to `distgit clone` without 404 errors or redundant clone attempts:
 ```bash
-# 1. Export missing package list:
-./bin/dbs -c tacos-distro.toml comps list-packages @workstation-product-environment --missing-only -d /srv/dbs/tacos/rpm > missing_workstation_pkgs.txt
+# 1. Export missing Source RPM repository list:
+./bin/dbs -c tacos-distro.toml comps list-packages @workstation-product-environment --missing-only --source -d /srv/dbs/tacos/rpm > missing_workstation_srcs.txt
 
-# 2. Batch-clone all missing packages:
-cat missing_workstation_pkgs.txt | xargs ./bin/dbs -c tacos-distro.toml distgit clone
+# 2. Batch-clone all missing source repositories:
+cat missing_workstation_srcs.txt | xargs ./bin/dbs -c tacos-distro.toml distgit clone
 ```
 
 ##### Method C: Pre-fetch Upstream Source Tarballs into Lookaside
@@ -242,7 +242,16 @@ Once `.spec` and `sources` files are cloned, pre-fetch all upstream source archi
 ./bin/dbs -c tacos-distro.toml lookaside sync -j 16
 ```
 
-#### 7. Why Is Only One Package (e.g. `firefox`) Building in a Stage?
+#### 7. Avoiding False Positives for Subpackages (e.g. `intel-vsc-firmware`)
+Comps environments specify binary subpackages (e.g. `intel-vsc-firmware`, `systemd-udev`), whereas dist-git repositories are organized by Source RPM names (e.g. `linux-firmware`, `systemd`).
+
+Previously, checking `/srv/dbs/tacos/rpm` for `intel-vsc-firmware` would report it as missing even if `linux-firmware/linux-firmware.spec` was already cloned locally. DBS solves this via a two-tier resolution engine:
+1. **Local Spec Subpackage Scanner:** Scans all `.spec` files in `/srv/dbs/tacos/rpm` and indexes `%package [-n] <name>`, `%package <subname>` (`%{name}-<subname>`), and `Provides:` capabilities. If a local `.spec` produces the subpackage, it is immediately marked as **present**.
+2. **DNF5 SRPM Resolver:** For remaining candidate missing packages, queries `dnf5 repoquery --queryformat "%{name}|%{source_name}"`. If the parent source package (e.g. `linux-firmware`) is present locally, all its subpackages are treated as present.
+3. **Canonical Clone Mapping:** If you run `dbs distgit clone intel-vsc-firmware`, DBS automatically detects that it is a subpackage of `linux-firmware` and clones the parent source git repository instead of failing with HTTP 404.
+4. **Build Scheduling:** When `dbs distro build` resolves a subpackage (such as `intel-vsc-firmware`), it maps it directly to `linux-firmware/linux-firmware.spec` and ensures the spec is compiled once.
+
+#### 8. Why Is Only One Package (e.g. `firefox`) Building in a Stage?
 If `dbs distro build` or `dbs distro build --stage workstation` appears to only build a single package:
 1. **Missing Local Clones:** DBS only compiles packages present locally in `/srv/dbs/tacos/rpm`. If other workstation packages haven't been cloned yet, DBS only schedules the ones that exist. Use `./bin/dbs comps list-packages @workstation-product-environment --present-only -d /srv/dbs/tacos/rpm` to verify what is present.
 2. **Topological Layering (Kahn's BFS):** DBS compiles in layers based on `BuildRequires`. If a package is placed in a layer by itself (e.g. `Stage 'workstation' - Layer 0 (1 package(s))`), only 1 package will be built during that layer, even with `-j 16` concurrency. Subsequent layers start once that package finishes.

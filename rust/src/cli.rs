@@ -996,6 +996,10 @@ pub struct CompsListPackagesArgs {
     #[arg(long, conflicts_with = "present_only")]
     pub missing_only: bool,
 
+    /// Output canonical Source RPM (dist-git) repository names instead of binary subpackage names.
+    #[arg(short = 's', long, visible_alias = "src", visible_alias = "source-packages")]
+    pub source: bool,
+
     /// Path to dist-git directory to check local package presence against.
     #[arg(short = 'd', long)]
     pub dest: Option<PathBuf>,
