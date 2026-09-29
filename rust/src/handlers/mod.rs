@@ -848,11 +848,26 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     }
 
     let total_edges: usize = graph.dependencies.values().map(|s| s.len()).sum();
-    let layers = graph.compute_layers()?;
+    let (layers, broken_edges) = if args.break_cycles {
+        let (l, b) = match graph.compute_layers_with_cycle_breaker() {
+            Ok(res) => res,
+            Err(e) => return Err(eyre!("Failed computing topological layers with cycle breaker: {}", e)),
+        };
+        (l, b)
+    } else {
+        let l = match graph.compute_layers() {
+            Ok(res) => res,
+            Err(e) => return Err(eyre!("Failed computing topological layers: {}", e)),
+        };
+        (l, Vec::new())
+    };
 
     println!("  * Total Packages Loaded:       {}", graph.packages.len());
     println!("  * Total Dependency Edges:      {}", total_edges);
     println!("  * Total Compilation Layers:    {}", layers.len());
+    if !broken_edges.is_empty() {
+        println!("  * Broken Circular Edges:       {} (base chroot bootstrap fallback)", broken_edges.len());
+    }
     println!("===========================================================");
 
     for layer in &layers {
@@ -869,7 +884,15 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         report.push_str(&format!("* **Source Directory:** `{}`\n", path.display()));
         report.push_str(&format!("* **Total Packages:** {}\n", graph.packages.len()));
         report.push_str(&format!("* **Total Dependency Edges:** {}\n", total_edges));
-        report.push_str(&format!("* **Compilation Layers:** {}\n\n", layers.len()));
+        report.push_str(&format!("* **Compilation Layers:** {}\n", layers.len()));
+        if !broken_edges.is_empty() {
+            report.push_str(&format!("* **Broken Circular Edges:** {}\n", broken_edges.len()));
+            report.push_str("\n### Circular Dependencies Broken via Base Chroot Fallback\n\n");
+            for edge in &broken_edges {
+                report.push_str(&format!("* `{}` -> `{}` (cycle broken)\n", edge.consumer, edge.prerequisite));
+            }
+        }
+        report.push('\n');
 
         for layer in &layers {
             report.push_str(&format!("### Layer {} ({} packages)\n\n", layer.layer_index, layer.packages.len()));

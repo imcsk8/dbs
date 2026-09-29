@@ -368,6 +368,10 @@ pub struct DagArgs {
     /// Automatically download and cache missing source archives into the lookaside cache.
     #[arg(long, visible_alias = "sources", default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub fetch_sources: bool,
+
+    /// Automatically detect and break circular dependencies via base chroot fallback.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub break_cycles: bool,
 }
 
 /// Arguments for the `chroot` subcommand.
