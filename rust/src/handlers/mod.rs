@@ -9,10 +9,10 @@ use std::sync::Arc;
 use eyre::{eyre, Result};
 
 use crate::cli::{
-    self, BuildArgs, ChrootArgs, ChrootCommands, ConfigArgs, ConfigCommands, DagArgs, DbArgs,
-    DbCommands, DistgitArgs, DistgitCommands, DistroArgs, DistroCommands, ExploreArgs,
-    LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs, RetryArgs, ShellArgs,
-    CleanArgs,
+    self, BuildArgs, ChrootArgs, ChrootCommands, CleanArgs, CompsArgs, CompsCommands, ConfigArgs,
+    ConfigCommands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs,
+    DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs,
+    RetryArgs, ShellArgs,
 };
 use crate::chroot;
 use crate::config::DbsConfig;
@@ -115,8 +115,26 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             let client = DistGitClient::new(config).with_api_key(effective_api_key);
             let effective_top_origin = new_top_origin.or_else(|| dbs_cfg.distgit.new_top_origin.clone());
 
-            println!("Cloning {} package(s) from {} to {}...", packages.len(), distro, dest.display());
+            let mut expanded_packages = Vec::new();
+            let resolver = crate::comps::CompsResolver::new();
             for item in packages {
+                let entry = crate::comps::extract_package_entry(&item);
+                if crate::comps::is_comps_target(entry) {
+                    println!("▶ Resolving comps target '{}' for cloning...", entry);
+                    match resolver.resolve_comps_target(entry, false) {
+                        Ok(pkgs) => {
+                            println!("✓ Expanded comps target '{}' into {} package(s) to clone", entry, pkgs.len());
+                            expanded_packages.extend(pkgs);
+                        }
+                        Err(e) => return Err(eyre!("Failed to resolve comps target '{}': {}", entry, e)),
+                    }
+                } else {
+                    expanded_packages.push(item);
+                }
+            }
+
+            println!("Cloning {} package(s) from {} to {}...", expanded_packages.len(), distro, dest.display());
+            for item in expanded_packages {
                 let (source_pkg, target_name) = if let Some((src, tgt)) = item.split_once(':') {
                     (src.trim(), tgt.trim())
                 } else if let Some(rename) = &rename_as {
@@ -350,6 +368,28 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
     let record_db = args.record_db || dbs_cfg.database.record_db;
     let distgit_dest = &dbs_cfg.distgit.dest;
 
+    // Expand any comps targets in args.targets (e.g. @core, @workstation-product-environment)
+    let mut expanded_cli_targets = Vec::new();
+    let resolver = crate::comps::CompsResolver::new();
+    for t in args.targets {
+        let t_str = t.to_string_lossy();
+        let entry = crate::comps::extract_package_entry(&t_str);
+        if crate::comps::is_comps_target(entry) {
+            println!("▶ Resolving comps target: {}", entry);
+            match resolver.resolve_comps_target(entry, false) {
+                Ok(pkgs) => {
+                    println!("✓ Expanded comps target '{}' into {} package(s)", entry, pkgs.len());
+                    for p in pkgs {
+                        expanded_cli_targets.push(PathBuf::from(p));
+                    }
+                }
+                Err(e) => return Err(eyre!("Failed to resolve comps target '{}': {}", entry, e)),
+            }
+        } else {
+            expanded_cli_targets.push(t);
+        }
+    }
+
     // If --packages was provided, load targets from the file
     if let Some(pkg_file) = &args.packages {
         println!("Loading package build targets from file: {}", pkg_file.display());
@@ -357,7 +397,7 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
         println!("✓ Loaded {} package(s) from {}", file_targets.len(), pkg_file.display());
 
         let mut combined = file_targets;
-        for t in args.targets {
+        for t in expanded_cli_targets {
             let resolved = runner::resolve_package_target(&t.to_string_lossy(), distgit_dest)
                 .unwrap_or(t);
             if !combined.contains(&resolved) {
@@ -366,8 +406,8 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
         }
         args.targets = combined;
     } else {
-        let mut resolved_targets = Vec::with_capacity(args.targets.len());
-        for t in args.targets {
+        let mut resolved_targets = Vec::with_capacity(expanded_cli_targets.len());
+        for t in expanded_cli_targets {
             let target_str = t.to_string_lossy();
             let resolved = match runner::resolve_package_target(&target_str, distgit_dest) {
                 Ok(path) => path,
@@ -1310,6 +1350,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             stages,
             packages,
             break_cycles,
+            targets,
         } => {
             let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
             let path = path.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
@@ -1335,7 +1376,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
             println!("===========================================================");
 
-            // 1. Determine execution plan: Stages vs Manifest vs Full Directory
+            // 1. Determine execution plan: Direct targets vs Stages vs Manifest vs Full Directory
             struct StageTask {
                 name: String,
                 spec_paths: Option<Vec<PathBuf>>,
@@ -1343,7 +1384,42 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
             let mut tasks: Vec<StageTask> = Vec::new();
 
-            if let Some(pkg_file) = packages {
+            if !targets.is_empty() {
+                let mut resolved_specs = Vec::new();
+                let resolver = crate::comps::CompsResolver::new();
+                for t in targets {
+                    let entry = crate::comps::extract_package_entry(&t);
+                    if crate::comps::is_comps_target(entry) {
+                        println!("\n▶ Resolving comps target: {}", entry);
+                        match resolver.resolve_comps_target(entry, false) {
+                            Ok(pkgs) => {
+                                println!("✓ Expanded comps target '{}' into {} package(s)", entry, pkgs.len());
+                                for pkg in pkgs {
+                                    if let Ok(spec) = runner::resolve_package_target(&pkg, &path) {
+                                        resolved_specs.push(spec);
+                                    }
+                                }
+                            }
+                            Err(e) => return Err(eyre!("Failed resolving comps target '{}': {}", entry, e)),
+                        }
+                    } else {
+                        match runner::resolve_package_target(entry, &path) {
+                            Ok(spec) => resolved_specs.push(spec),
+                            Err(e) => return Err(eyre!("Could not resolve package target '{}': {}", entry, e)),
+                        }
+                    }
+                }
+
+                if resolved_specs.is_empty() {
+                    return Err(eyre!("No package targets resolved to build in {}", path.display()));
+                }
+
+                println!("✓ Target resolution: {} package specification(s) prepared for DAG scheduling", resolved_specs.len());
+                tasks.push(StageTask {
+                    name: "cli-targets".to_string(),
+                    spec_paths: Some(resolved_specs),
+                });
+            } else if let Some(pkg_file) = packages {
                 println!("\n▶ Loading package targets from manifest file: {}", pkg_file.display());
                 let targets = runner::load_packages_from_file(&pkg_file, &path)?;
                 tasks.push(StageTask {
@@ -1955,22 +2031,47 @@ pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         }
         runner::load_packages_from_file(file_path, distgit_dest)?
     } else if let Some(ref pkg_input) = args.package {
-        let target = match runner::resolve_package_target(pkg_input, distgit_dest) {
-            Ok(path) => path,
-            Err(_) => {
-                let as_path = PathBuf::from(pkg_input);
-                if as_path.exists() {
-                    as_path
-                } else {
-                    return Err(eyre!(
-                        "Could not resolve package '{}' in {} or current directory.",
-                        pkg_input,
-                        distgit_dest.display()
-                    ));
+        let entry = crate::comps::extract_package_entry(pkg_input);
+        if crate::comps::is_comps_target(entry) {
+            println!("▶ Resolving comps retry target: {}", entry);
+            let resolver = crate::comps::CompsResolver::new();
+            let pkgs = match resolver.resolve_comps_target(entry, false) {
+                Ok(p) => p,
+                Err(e) => return Err(eyre!("Failed to resolve comps target '{}': {}", entry, e)),
+            };
+            let mut resolved_list = Vec::new();
+            for pkg in pkgs {
+                if let Ok(path) = runner::resolve_package_target(&pkg, distgit_dest) {
+                    resolved_list.push(path);
                 }
             }
-        };
-        vec![target]
+            if resolved_list.is_empty() {
+                return Err(eyre!(
+                    "None of the packages from comps target '{}' were found locally in {}",
+                    entry,
+                    distgit_dest.display()
+                ));
+            }
+            println!("✓ Found {} local package(s) from comps target '{}' to retry", resolved_list.len(), entry);
+            resolved_list
+        } else {
+            let target = match runner::resolve_package_target(pkg_input, distgit_dest) {
+                Ok(path) => path,
+                Err(_) => {
+                    let as_path = PathBuf::from(pkg_input);
+                    if as_path.exists() {
+                        as_path
+                    } else {
+                        return Err(eyre!(
+                            "Could not resolve package '{}' in {} or current directory.",
+                            pkg_input,
+                            distgit_dest.display()
+                        ));
+                    }
+                }
+            };
+            vec![target]
+        }
     } else {
         return Err(eyre!(
             "Please provide a package name (e.g. 'dbs retry gcc') or specify a packages file with '--file <FILE>'."
@@ -2375,6 +2476,145 @@ pub async fn handle_failed(mut args: cli::pkg::ListPkgArgs, dbs_cfg: &DbsConfig)
     cli::pkg::list(&mut conn, &args)
 }
 
+/// Dispatches the `comps` subcommand to inspect, list, and expand RPM comps environments and groups.
+pub async fn handle_comps(args: CompsArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    match args.action {
+        CompsCommands::Inspect(inspect_args) => {
+            let resolver = crate::comps::CompsResolver::new();
+            let dest = inspect_args.dest.as_deref().unwrap_or(&dbs_cfg.distgit.dest);
+            let inspection = match resolver.inspect_target(&inspect_args.target, inspect_args.optional, Some(dest)) {
+                Ok(insp) => insp,
+                Err(e) => return Err(eyre!("Failed inspecting comps target '{}': {}", inspect_args.target, e)),
+            };
+
+            println!("===========================================================");
+            println!(" DBS Comps Target Inspection: {}", inspection.target);
+            println!(" Type:        {}", inspection.kind);
+            println!(" ID:          {}", inspection.id);
+            println!(" Name:        {}", inspection.name);
+            if !inspection.description.is_empty() {
+                println!(" Description: {}", inspection.description);
+            }
+            println!("===========================================================");
+
+            if inspection.kind == crate::comps::CompsKind::Environment {
+                println!("Constituent Groups ({}):", inspection.groups.len());
+                for g in &inspection.groups {
+                    println!(
+                        "  * {:<28} ({} mandatory, {} default, {} optional)",
+                        g.id,
+                        g.mandatory_packages.len(),
+                        g.default_packages.len(),
+                        g.optional_packages.len()
+                    );
+                }
+                println!();
+            }
+
+            println!("Package Metrics:");
+            println!("  * Mandatory packages: {}", inspection.mandatory_count);
+            println!("  * Default packages:   {}", inspection.default_count);
+            if inspect_args.optional {
+                println!("  * Optional packages:  {} (included)", inspection.optional_count);
+            } else {
+                println!(
+                    "  * Optional packages:  {} (omitted, pass --optional to include)",
+                    inspection.optional_count
+                );
+            }
+            println!("  * Total Unique:       {}", inspection.all_packages.len());
+            println!();
+
+            println!("Local Dist-Git Presence ({}):", dest.display());
+            println!("  * Present locally:    {}", inspection.local_present_packages.len());
+            println!("  * Missing locally:    {}", inspection.local_missing_packages.len());
+
+            if !inspection.local_present_packages.is_empty() {
+                println!("\nPresent Packages:");
+                for p in &inspection.local_present_packages {
+                    println!("  ✓ {}", p);
+                }
+            }
+
+            if !inspection.local_missing_packages.is_empty() {
+                println!("\nMissing Packages (need cloning):");
+                for p in inspection.local_missing_packages.iter().take(20) {
+                    println!("  ✗ {}", p);
+                }
+                if inspection.local_missing_packages.len() > 20 {
+                    println!(
+                        "  ... and {} more (use 'dbs comps list-packages --missing-only' to view all)",
+                        inspection.local_missing_packages.len() - 20
+                    );
+                }
+            }
+            println!("===========================================================");
+        }
+
+        CompsCommands::ListPackages(list_args) => {
+            let resolver = crate::comps::CompsResolver::new();
+            let dest = list_args.dest.as_deref().unwrap_or(&dbs_cfg.distgit.dest);
+
+            if list_args.present_only || list_args.missing_only {
+                let inspection = match resolver.inspect_target(&list_args.target, list_args.optional, Some(dest)) {
+                    Ok(insp) => insp,
+                    Err(e) => return Err(eyre!("Failed inspecting comps target '{}': {}", list_args.target, e)),
+                };
+                let list = if list_args.present_only {
+                    inspection.local_present_packages
+                } else {
+                    inspection.local_missing_packages
+                };
+                for p in list {
+                    println!("{}", p);
+                }
+            } else {
+                let packages = match resolver.resolve_comps_target(&list_args.target, list_args.optional) {
+                    Ok(pkgs) => pkgs,
+                    Err(e) => return Err(eyre!("Failed resolving comps target '{}': {}", list_args.target, e)),
+                };
+                for p in packages {
+                    println!("{}", p);
+                }
+            }
+        }
+
+        CompsCommands::List(list_args) => {
+            let resolver = crate::comps::CompsResolver::new();
+
+            if !list_args.groups {
+                println!("===========================================================");
+                println!(" DBS Available Comps Environments");
+                println!("===========================================================");
+                let envs = match resolver.list_environments() {
+                    Ok(e) => e,
+                    Err(err) => return Err(eyre!("Failed to list comps environments: {}", err)),
+                };
+                for (id, name) in envs {
+                    println!("  * @{:<36} {}", id, name);
+                }
+                println!();
+            }
+
+            if !list_args.environments {
+                println!("===========================================================");
+                println!(" DBS Available Comps Groups");
+                println!("===========================================================");
+                let groups = match resolver.list_groups() {
+                    Ok(g) => g,
+                    Err(err) => return Err(eyre!("Failed to list comps groups: {}", err)),
+                };
+                for (id, name) in groups {
+                    println!("  * @{:<36} {}", id, name);
+                }
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2537,6 +2777,34 @@ mod tests {
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Retry packages file not found"));
+    }
+
+    #[tokio::test]
+    async fn test_comps_inspect_invalid() {
+        let (dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let args = CompsArgs {
+            action: CompsCommands::Inspect(crate::cli::CompsInspectArgs {
+                target: "@nonexistent-comps-group-12345".to_string(),
+                optional: false,
+                dest: None,
+            }),
+        };
+        let res = handle_comps(args, &dbs_cfg).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("not found as an environment or group"));
+    }
+
+    #[tokio::test]
+    async fn test_comps_list_runs() {
+        let (dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        let args = CompsArgs {
+            action: CompsCommands::List(crate::cli::CompsListArgs {
+                environments: true,
+                groups: false,
+            }),
+        };
+        let res = handle_comps(args, &dbs_cfg).await;
+        assert!(res.is_ok());
     }
 }
 

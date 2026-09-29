@@ -9,6 +9,7 @@ use log::debug;
 
 pub mod chroot;
 pub mod cli;
+pub mod comps;
 pub mod config;
 pub mod dag;
 pub mod db;
@@ -61,6 +62,7 @@ async fn main() -> Result<()> {
         Commands::Clean(args) => handlers::handle_clean(args, &dbs_cfg).await?,
         Commands::Failed(args) => handlers::handle_failed(args, &dbs_cfg).await?,
         Commands::Config(args) => handlers::handle_config(args, &dbs_cfg, loaded_path.as_deref()).await?,
+        Commands::Comps(args) => handlers::handle_comps(args, &dbs_cfg).await?,
     }
 
     Ok(())

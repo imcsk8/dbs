@@ -89,6 +89,9 @@ pub enum Commands {
 
     /// Manage, view, and initialize DBS TOML configuration files.
     Config(ConfigArgs),
+
+    /// Inspect, list, and resolve RPM comps groups and environments (e.g. @workstation-product-environment, @core).
+    Comps(CompsArgs),
 }
 
 /// Arguments for the `monitor` / `top` subcommand.
@@ -633,6 +636,9 @@ pub enum DistroCommands {
         /// Automatically detect and break circular dependencies via base chroot fallback.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
         break_cycles: bool,
+
+        /// Target package specifications, names, or comps groups/environments to build (e.g. @core, @workstation-product-environment, bash).
+        targets: Vec<String>,
     },
 
     /// Organize RPMs into standard layout, run createrepo_c, optionally GPG sign, and generate client .repo.
@@ -899,4 +905,76 @@ pub struct CleanArgs {
     #[arg(long)]
     pub no_db: bool,
 }
+
+/// Arguments for the `comps` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct CompsArgs {
+    #[command(subcommand)]
+    pub action: CompsCommands,
+}
+
+/// Comps subcommands for inspecting and listing RPM comps metadata.
+#[derive(Subcommand, Debug, Clone)]
+pub enum CompsCommands {
+    /// Inspect an environment or group, showing constituent groups, packages, and local dist-git status.
+    Inspect(CompsInspectArgs),
+
+    /// List package names contained in a comps environment or group (one per line).
+    #[command(alias = "packages", alias = "pkgs")]
+    ListPackages(CompsListPackagesArgs),
+
+    /// List all available comps environments and groups from repositories.
+    List(CompsListArgs),
+}
+
+/// Arguments for `dbs comps inspect`.
+#[derive(Args, Debug, Clone)]
+pub struct CompsInspectArgs {
+    /// Comps environment or group identifier (e.g. @workstation-product-environment, core).
+    pub target: String,
+
+    /// Include optional packages in inspection.
+    #[arg(long)]
+    pub optional: bool,
+
+    /// Path to dist-git directory to check local package presence against.
+    #[arg(short = 'd', long)]
+    pub dest: Option<PathBuf>,
+}
+
+/// Arguments for `dbs comps list-packages`.
+#[derive(Args, Debug, Clone)]
+pub struct CompsListPackagesArgs {
+    /// Comps environment or group identifier (e.g. @core, @workstation-product-environment).
+    pub target: String,
+
+    /// Include optional packages in output.
+    #[arg(long)]
+    pub optional: bool,
+
+    /// Only list packages that are present locally in dist-git directory.
+    #[arg(long, conflicts_with = "missing_only")]
+    pub present_only: bool,
+
+    /// Only list packages that are missing locally from dist-git directory.
+    #[arg(long, conflicts_with = "present_only")]
+    pub missing_only: bool,
+
+    /// Path to dist-git directory to check local package presence against.
+    #[arg(short = 'd', long)]
+    pub dest: Option<PathBuf>,
+}
+
+/// Arguments for `dbs comps list`.
+#[derive(Args, Debug, Clone)]
+pub struct CompsListArgs {
+    /// Show only environments.
+    #[arg(long, conflicts_with = "groups")]
+    pub environments: bool,
+
+    /// Show only groups (including hidden groups).
+    #[arg(long, conflicts_with = "environments")]
+    pub groups: bool,
+}
+
 

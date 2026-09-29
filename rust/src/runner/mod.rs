@@ -1280,12 +1280,49 @@ pub fn parse_packages_list(content: &str, distgit_dest: &Path, file_path: &Path)
             continue;
         }
 
-        // Skip comps groups or environment definitions (e.g. @workstation-product-environment)
-        if clean.starts_with('@') {
+        // Skip XML comments and non-package XML tags (e.g. <!-- ... -->, <packages>, </image>)
+        if clean.starts_with('<') && !clean.contains("<package") {
             continue;
         }
 
-        match resolve_package_target(clean, distgit_dest) {
+        let entry = crate::comps::extract_package_entry(clean);
+        if crate::comps::is_comps_target(entry) {
+            let resolver = crate::comps::CompsResolver::new();
+            let pkgs = match resolver.resolve_comps_target(entry, false) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err(eyre!(
+                        "Line {} in packages file {}: Failed to resolve comps target '{}': {}",
+                        line_no + 1,
+                        file_path.display(),
+                        entry,
+                        e
+                    ));
+                }
+            };
+
+            let mut resolved_any = false;
+            for pkg in pkgs {
+                if let Ok(resolved) = resolve_package_target(&pkg, distgit_dest)
+                    && seen.insert(resolved.clone()) {
+                        targets.push(resolved);
+                        resolved_any = true;
+                    }
+            }
+
+            if !resolved_any {
+                eprintln!(
+                    "Notice: Line {} in {}: Comps target '{}' resolved, but no member packages were found locally in {}",
+                    line_no + 1,
+                    file_path.display(),
+                    entry,
+                    distgit_dest.display()
+                );
+            }
+            continue;
+        }
+
+        match resolve_package_target(entry, distgit_dest) {
             Ok(resolved) => {
                 if seen.insert(resolved.clone()) {
                     targets.push(resolved);
@@ -1486,6 +1523,27 @@ missing_pkg
         let res = parse_packages_list(manifest, &distgit, fake_file);
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("No valid package targets found"));
+    }
+
+    #[test]
+    fn test_parse_packages_list_xml_and_comps() {
+        let dir = tempdir().unwrap();
+        let distgit = dir.path().join("distgit");
+
+        let p1 = distgit.join("bash");
+        fs::create_dir_all(&p1).unwrap();
+        let spec1 = p1.join("bash.spec");
+        File::create(&spec1).unwrap();
+
+        let manifest = r#"
+<!-- Kiwi XML elements or plain targets -->
+<package name="bash"/>
+<package name="@core"/>
+"#;
+        let fake_file = Path::new("config.xml");
+        let targets = parse_packages_list(manifest, &distgit, fake_file).unwrap();
+        assert!(!targets.is_empty());
+        assert_eq!(targets[0], spec1);
     }
 
     #[test]
