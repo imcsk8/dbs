@@ -535,6 +535,63 @@ dbs distro build --nocheck-pkg cockpit,git -j 8
 
 ---
 
+### Category 7: Local Repository Priority vs Upstream Mirrors (Librepo 404 / All Mirrors Were Tried)
+
+* **Symptom:**
+  ```text
+  Building /srv/dbs/tacos/rpm/<target>/<target>.spec in Mock...
+  -----------------------------------------------------------
+    Build Status:  FAILED
+    Failure:       Librepo error: Cannot download Packages/.../<dep>-<version>-<higher_rel>.fc46.x86_64.rpm: All mirrors were tried
+  ```
+  Even though `<dep>-<version>-<lower_rel>.tcrs.x86_64.rpm` has already been built and published in `/srv/dbs/tacos/distro/tacos-stable-x86_64/x86_64/`, Mock attempts to fetch a higher release from upstream Rawhide and fails because Rawhide mirror synchronization rapidly purges older builds.
+
+* **Root Cause Analysis:**
+  1. **EVR & DNF5 Priority Precedence:** In DNF5, `cost` (default: `1000`) is **strictly a tie-breaker** for identical Epoch-Version-Release packages. Because upstream Rawhide has a higher release number (e.g., `-4.fc46`) than the initial TacOS rebuild (e.g., `-1.tcrs`), DNF5 prefers the higher EVR unless repository `priority` is explicitly set.
+  2. **Mock Template Repository Configuration:** By default, Mock's chroot template only included `[fedora]` pointing to Rawhide. Neither the dynamic staging repository nor the published local TacOS repository were configured with priority.
+  3. **Mirror Eviction:** Fedora Rawhide packages roll rapidly. Once Koji builds a newer revision, older packages are deleted from mirror storage within hours. Repodata caches referencing the evicted RPM return HTTP 404 from all mirrors.
+
+* **Permanent Resolution:**
+  1. **Mock Profile Priority Hierarchy:**
+     Configure repositories in Mock chroot templates (`mock/templates/tacos-stable-x86_64.tpl` and `tacos-rolling.tpl`) with explicit DNF5 priority:
+     ```ini
+     [tacos-staging]
+     name=TacOS Dynamic Staging Repository
+     baseurl=file:///srv/dbs/tacos/staging/rpms/{{ target_arch }}
+     enabled=1
+     gpgcheck=0
+     metadata_expire=0
+     cost=1
+     priority=1
+     skip_if_unavailable=1
+
+     [tacos-local]
+     name=TacOS Local Build Repository
+     baseurl=file:///srv/dbs/tacos/distro/tacos-stable-x86_64/{{ target_arch }}
+     enabled=1
+     gpgcheck=0
+     metadata_expire=0
+     cost=1
+     priority=2
+     skip_if_unavailable=1
+
+     [fedora]
+     name=Fedora Rawhide
+     metalink=https://mirrors.fedoraproject.org/metalink?repo=rawhide&arch=$basearch
+     gpgcheck=0
+     enabled=1
+     priority=99
+     ```
+  2. **DBS Automatic Local Repo Injection:**
+     DBS automatically resolves the published distro directory (`<dest>/<name>/<arch>`) and dynamically wires it into `MockRunner` (`--addrepo=file://...`) across `dbs build`, `dbs retry`, and `dbs distro build`.
+  3. **Re-indexing Local Repository:**
+     If new packages are manually copied to the distro repository, ensure repodata metadata is refreshed:
+     ```bash
+     createrepo_c --update /srv/dbs/tacos/distro/tacos-stable-x86_64/x86_64
+     ```
+
+---
+
 ## 4. Interactive In-Chroot Command Cheat Sheet
 
 When inside `dbs shell <pkg>`, use these short-circuit commands to test fixes instantly:

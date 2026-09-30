@@ -76,6 +76,7 @@ metalink=https://mirrors.fedoraproject.org/metalink?repo=rawhide&arch=$basearch
 gpgkey={{ rawhide_gpg_keys() }}
 gpgcheck=1
 skip_if_unavailable=False
+priority=99
 
 [fedora-debuginfo]
 name=Fedora Rawhide - Debug
@@ -94,12 +95,32 @@ enabled=0
 skip_if_unavailable=False
 {% endif %}
 
+[tacos-staging]
+name=TacOS Dynamic Staging Repository
+baseurl=file:///srv/dbs/tacos/staging/rpms/{{ target_arch }}
+enabled=1
+gpgcheck=0
+metadata_expire=0
+cost=1
+priority=1
+skip_if_unavailable=1
+
+[tacos-local]
+name=TacOS Local Build Repository
+baseurl=file:///srv/dbs/tacos/distro/tacos-stable-x86_64/{{ target_arch }}
+enabled=1
+gpgcheck=0
+metadata_expire=0
+cost=1
+priority=2
+skip_if_unavailable=1
+
 [tacos_os]
 name=TacOS Linux {{ channel }}
 baseurl=http://repos.tacos.org.mx/{{ channel }}/BaseOS/$basearch/os
 gpgcheck=0
 enabled=1
-
+priority=3
 """
 
 # Build isolation and execution tuning: disable tmpfs to avoid disk-full errors on massive packages (GCC, LLVM, etc.)

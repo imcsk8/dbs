@@ -599,6 +599,11 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
             runner = runner.with_nocheck_packages(effective_nocheck_pkgs.clone());
 
+            let distro_repo = dbs_cfg.distro.dest.join(&dbs_cfg.distro.name).join(&dbs_cfg.distro.arch);
+            if distro_repo.is_dir() {
+                runner = runner.with_local_repo(distro_repo);
+            }
+
             if let Some(l_dir) = lookaside_dir {
                 runner = runner.with_lookaside_dir(l_dir);
             }
@@ -609,6 +614,9 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             println!(" Chroot Profile: {}", runner.root_name);
             if let Some(cfg) = &runner.config_dir {
                 println!(" Chroot Config:  {}", cfg.display());
+            }
+            if let Some(lr) = &runner.local_repo_dir {
+                println!(" Local Repo:      {}", lr.display());
             }
             if let Some(ld) = &runner.lookaside_dir {
                 println!(" Lookaside Dir:  {}", ld.display());
@@ -1010,6 +1018,11 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         effective_nocheck_pkgs.extend(args.nocheck_packages.iter().cloned());
         mock_runner = mock_runner.with_nocheck_packages(effective_nocheck_pkgs.clone());
 
+        let distro_repo = dbs_cfg.distro.dest.join(&dbs_cfg.distro.name).join(&dbs_cfg.distro.arch);
+        if distro_repo.is_dir() {
+            mock_runner = mock_runner.with_local_repo(distro_repo);
+        }
+
         if let Some(l_dir) = lookaside_dir {
             mock_runner = mock_runner.with_lookaside_dir(l_dir);
         }
@@ -1020,6 +1033,9 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         println!(" Chroot Profile: {}", mock_runner.root_name);
         if let Some(cfg) = &mock_runner.config_dir {
             println!(" Chroot Config:  {}", cfg.display());
+        }
+        if let Some(lr) = &mock_runner.local_repo_dir {
+            println!(" Local Repo:      {}", lr.display());
         }
         if let Some(ld) = &mock_runner.lookaside_dir {
             println!(" Lookaside Dir:  {}", ld.display());
@@ -1730,6 +1746,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             mock_runner = mock_runner.with_smp_cpus(smp);
             mock_runner = mock_runner.with_nocheck(nocheck);
             mock_runner = mock_runner.with_nocheck_packages(effective_nocheck_pkgs);
+            let distro_repo = dbs_cfg.distro.dest.join(&dbs_cfg.distro.name).join(&dbs_cfg.distro.arch);
+            if distro_repo.is_dir() {
+                mock_runner = mock_runner.with_local_repo(distro_repo);
+            }
             if let Some(ld) = lookaside_dir.clone() {
                 mock_runner = mock_runner.with_lookaside_dir(ld);
             }

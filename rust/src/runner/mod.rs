@@ -404,6 +404,12 @@ impl MockRunner {
                 rebuild_cmd.arg(format!("--addrepo=file://{}", abs_repo.display()));
             }
 
+        let staging_repo = result_dir.join("rpms").join("x86_64");
+        if staging_repo.exists() && self.local_repo_dir.as_ref() != Some(&staging_repo) {
+            let abs_staging = fs::canonicalize(&staging_repo).unwrap_or(staging_repo);
+            rebuild_cmd.arg(format!("--addrepo=file://{}", abs_staging.display()));
+        }
+
         if let Some(smp) = self.smp_cpus {
             rebuild_cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
             rebuild_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));

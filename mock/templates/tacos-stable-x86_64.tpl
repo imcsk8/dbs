@@ -28,11 +28,32 @@ syslog_ident=mock
 install_weak_deps=0
 best=1
 
+[tacos-staging]
+name=TacOS Dynamic Staging Repository
+baseurl=file:///srv/dbs/tacos/staging/rpms/{{ target_arch }}
+enabled=1
+gpgcheck=0
+metadata_expire=0
+cost=1
+priority=1
+skip_if_unavailable=1
+
+[tacos-local]
+name=TacOS Local Build Repository
+baseurl=file:///srv/dbs/tacos/distro/tacos-stable-x86_64/{{ target_arch }}
+enabled=1
+gpgcheck=0
+metadata_expire=0
+cost=1
+priority=2
+skip_if_unavailable=1
+
 [fedora]
 name=Fedora Rawhide
 metalink=https://mirrors.fedoraproject.org/metalink?repo=rawhide&arch=$basearch
 gpgcheck=0
 enabled=1
+priority=99
 """
 
 # Build isolation and execution tuning: disable tmpfs to avoid disk-full errors on massive packages (GCC, LLVM, etc.)
