@@ -309,16 +309,39 @@ impl LookasideManager {
         hash: &str,
         dest: &Path,
     ) -> Result<bool> {
+        let hash_type = if hash.len() == 128 {
+            "sha512"
+        } else if hash.len() == 64 {
+            "sha256"
+        } else {
+            "md5"
+        };
+
         let urls = [
-            //TODO: make this configurable format!("https://repos.tacos.org.mx/sources/{}/{}", pkg_name, filename),
+            // 1. Fedora lookaside with hashtype (modern standard Fedora infrastructure)
+            format!(
+                "https://src.fedoraproject.org/repo/pkgs/{}/{}/{}/{}/{}",
+                pkg_name, filename, hash_type, hash, filename
+            ),
+            // 2. CentOS Stream lookaside with hashtype
+            format!(
+                "https://sources.stream.centos.org/sources/rpms/{}/{}/{}/{}/{}",
+                pkg_name, filename, hash_type, hash, filename
+            ),
+            // 3. Fedora legacy path without hashtype (for older MD5 or historical packages)
             format!(
                 "https://src.fedoraproject.org/repo/pkgs/{}/{}/{}/{}",
                 pkg_name, filename, hash, filename
             ),
-            /*format!(
-                "https://sources.stream.centos.org/sources/rpms/{}/{}/sha512/{}/{}",
-                pkg_name, filename, hash, filename
-            ),*/
+            // 4. TacOS lookaside cache (HTTPS / HTTP)
+            format!(
+                "https://repos.tacos.org.mx/sources/{}/{}",
+                pkg_name, filename
+            ),
+            format!(
+                "http://repos.tacos.org.mx/sources/{}/{}",
+                pkg_name, filename
+            ),
         ];
 
         for url in &urls {
@@ -339,6 +362,10 @@ impl LookasideManager {
                 && st.success() && dest.exists() {
                     return Ok(true);
                 }
+
+            if dest.exists() {
+                let _ = fs::remove_file(dest);
+            }
         }
 
         Ok(false)
