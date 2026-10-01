@@ -358,34 +358,34 @@ pub fn generate_nginx_config(root_path: &Path, server_name: &str, port: u16) -> 
         "# TacOS Distribution Repository Web Server Configuration\n\
          # Generated automatically by DBS\n\
          server {{\n\
-             listen {};\n\
-             server_name {};\n\n\
-             root {};\n\n\
-             # Enable directory listing\n\
-             autoindex on;\n\
-             autoindex_exact_size off;\n\
-             autoindex_localtime on;\n\n\
-             # High-throughput streaming settings for large binary payloads\n\
-             sendfile on;\n\
-             tcp_nopush on;\n\
-             tcp_nodelay on;\n\n\
-             # Repository metadata must NEVER be cached by proxies or browsers\n\
-             location ~* /repodata/.*$ {{\n\
-                 expires -1;\n\
-                 add_header Cache-Control \"no-cache, no-store, must-revalidate\";\n\
-             }}\n\n\
-             # Client .repo and GPG keys should refresh periodically\n\
-             location ~* \\.(repo|asc|cer)$ {{\n\
-                 expires 1h;\n\
-                 add_header Cache-Control \"public, must-revalidate\";\n\
-             }}\n\n\
-             # Version-immutable binary RPMs can be cached long-term\n\
-             location ~* \\.rpm$ {{\n\
-                 expires 30d;\n\
-                 add_header Cache-Control \"public\";\n\
-             }}\n\n\
-             access_log /var/log/nginx/{}_access.log;\n\
-             error_log  /var/log/nginx/{}_error.log;\n\
+         \tlisten {};\n\
+         \tserver_name {};\n\n\
+         \troot {};\n\n\
+         \t# Enable directory listing\n\
+         \tautoindex on;\n\
+         \tautoindex_exact_size off;\n\
+         \tautoindex_localtime on;\n\n\
+         \t# High-throughput streaming settings for large binary payloads\n\
+         \tsendfile on;\n\
+         \ttcp_nopush on;\n\
+         \ttcp_nodelay on;\n\n\
+         \t# Repository metadata must NEVER be cached by proxies or browsers\n\
+         \tlocation ~* /repodata/.*$ {{\n\
+         \t\texpires -1;\n\
+         \t\tadd_header Cache-Control \"no-cache, no-store, must-revalidate\";\n\
+         \t}}\n\n\
+         \t# Client .repo and GPG keys should refresh periodically\n\
+         \tlocation ~* \\.(repo|asc|cer)$ {{\n\
+         \t\texpires 1h;\n\
+         \t\tadd_header Cache-Control \"public, must-revalidate\";\n\
+         \t}}\n\n\
+         \t# Version-immutable binary RPMs can be cached long-term\n\
+         \tlocation ~* \\.rpm$ {{\n\
+         \t\texpires 30d;\n\
+         \t\tadd_header Cache-Control \"public\";\n\
+         \t}}\n\n\
+         \taccess_log /var/log/nginx/{}_access.log;\n\
+         \terror_log  /var/log/nginx/{}_error.log;\n\
          }}\n",
         port,
         server_name,
