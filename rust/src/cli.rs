@@ -128,6 +128,22 @@ pub struct ExploreArgs {
     /// Optional API token / key for authenticating with dist-git forge APIs.
     #[arg(long, env = "DBS_DISTGIT_API_KEY")]
     pub api_key: Option<String>,
+
+    /// Override dist-git clone URL template (supports {package}, {pkg}).
+    #[arg(long)]
+    pub git_url_template: Option<String>,
+
+    /// Override dist-git tracking branch (e.g. rawhide, c10s, master).
+    #[arg(long)]
+    pub branch: Option<String>,
+
+    /// Override dist-git forge API endpoint URL.
+    #[arg(long)]
+    pub api_url: Option<String>,
+
+    /// Override dist-git forge API backend type (pagure, gitlab, forgejo, repodata, generic-git).
+    #[arg(long)]
+    pub api_type: Option<crate::distgit::provider::ApiType>,
 }
 
 /// Arguments for the `distgit` subcommand.
@@ -168,6 +184,18 @@ pub enum DistgitCommands {
         /// Optional API token / key for authenticating with dist-git forge APIs.
         #[arg(long, env = "DBS_DISTGIT_API_KEY")]
         api_key: Option<String>,
+
+        /// Custom git clone URL template overriding preset (supports {package}, {pkg}).
+        #[arg(long)]
+        git_url_template: Option<String>,
+
+        /// Custom branch to clone overriding preset.
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Additional lookaside remote URL template(s) to prepend.
+        #[arg(long = "lookaside-url")]
+        lookaside_url: Vec<String>,
 
         /// Package names to clone (supports 'upstream_pkg' or 'upstream_pkg:target_name').
         #[arg(required = true)]
@@ -229,6 +257,18 @@ pub enum DistgitCommands {
         /// Optional API token / key for authenticating with dist-git forge APIs.
         #[arg(long, env = "DBS_DISTGIT_API_KEY")]
         api_key: Option<String>,
+
+        /// Custom git clone URL template overriding preset (supports {package}, {pkg}).
+        #[arg(long)]
+        git_url_template: Option<String>,
+
+        /// Custom branch to clone overriding preset.
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Additional lookaside remote URL template(s) to prepend.
+        #[arg(long = "lookaside-url")]
+        lookaside_url: Vec<String>,
     },
 
     /// Inspect a `.spec` file or local dist-git repository and display parsed metadata.
@@ -511,6 +551,10 @@ pub enum LookasideCommands {
         /// Destination path where the file should be staged.
         #[arg(short, long, default_value = ".")]
         dest: PathBuf,
+
+        /// Additional remote lookaside mirror URL template(s) to prepend.
+        #[arg(long = "remote")]
+        remotes: Vec<String>,
     },
 
     /// Pre-fetch and synchronize missing source archives for all dist-git packages in a directory.
@@ -522,6 +566,10 @@ pub enum LookasideCommands {
         /// Number of concurrent download workers.
         #[arg(short = 'j', long, default_value = "4")]
         concurrency: usize,
+
+        /// Additional remote lookaside mirror URL template(s) to prepend.
+        #[arg(long = "remote")]
+        remotes: Vec<String>,
     },
 
     /// Display lookaside cache metrics, disk usage, CAS objects, and BTRFS filesystem status.

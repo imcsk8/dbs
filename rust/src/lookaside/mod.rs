@@ -23,11 +23,72 @@ pub const DEFAULT_LOOKASIDE_PATH: &str = "/srv/dbs/lookaside";
 /// Fallback local lookaside directory within the project workspace.
 pub const LOCAL_LOOKASIDE_FALLBACK: &str = "data/lookaside";
 
+/// Template for dynamic lookaside cache URLs supporting variable placeholders:
+/// - `{package}` or `{pkg}`: Package name (e.g. `firefox`, `systemd`)
+/// - `{filename}` or `{file}`: Archive filename (e.g. `zstd-1.5.7.tar.gz`)
+/// - `{hash}`: Cryptographic hash checksum
+/// - `{hashtype}`: Lowercase hash algorithm name (`sha512`, `sha256`, `md5`)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LookasideUrlTemplate(pub String);
+
+impl LookasideUrlTemplate {
+    /// Creates a new `LookasideUrlTemplate`.
+    pub fn new(template: impl Into<String>) -> Self {
+        Self(template.into())
+    }
+
+    /// Returns a string slice of the underlying template.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Expands template placeholders with the given package name, archive filename, and hash.
+    pub fn expand(&self, package: &str, filename: &str, hash: &str) -> String {
+        let hash_type = match hash.len() {
+            128 => "sha512",
+            64 => "sha256",
+            32 => "md5",
+            _ => "sha512",
+        };
+
+        self.0
+            .replace("{package}", package)
+            .replace("{pkg}", package)
+            .replace("{filename}", filename)
+            .replace("{file}", filename)
+            .replace("{hash}", hash)
+            .replace("{hashtype}", hash_type)
+    }
+}
+
+impl std::fmt::Display for LookasideUrlTemplate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Returns the standard default fallback lookaside cache URL templates.
+pub fn default_lookaside_templates() -> Vec<String> {
+    vec![
+        // 1. Fedora modern lookaside with hashtype
+        "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+        // 2. CentOS Stream lookaside with hashtype
+        "https://sources.stream.centos.org/sources/rpms/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+        // 3. Fedora legacy path without hashtype
+        "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hash}/{filename}".to_string(),
+        // 4. TacOS lookaside cache (HTTPS / HTTP)
+        "https://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+        "http://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+    ]
+}
+
 /// Primary Lookaside Cache Manager.
 #[derive(Debug, Clone)]
 pub struct LookasideManager {
     /// Root path of the lookaside cache repository.
     pub root: PathBuf,
+    /// Ordered remote URL templates queried sequentially when fetching sources.
+    pub remotes: Vec<String>,
 }
 
 /// Metadata and status report of an uploaded source archive.
@@ -74,9 +135,31 @@ pub struct SyncReport {
 }
 
 impl LookasideManager {
-    /// Instantiates a LookasideManager for the specified root directory.
+    /// Instantiates a LookasideManager for the specified root directory with default remote mirrors.
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            remotes: default_lookaside_templates(),
+        }
+    }
+
+    /// Configures remote lookaside URL templates, prepending custom remotes to defaults.
+    pub fn with_remotes(mut self, remotes: &[String]) -> Self {
+        if !remotes.is_empty() {
+            let mut combined = Vec::new();
+            for r in remotes {
+                if !combined.contains(r) {
+                    combined.push(r.clone());
+                }
+            }
+            for d in default_lookaside_templates() {
+                if !combined.contains(&d) {
+                    combined.push(d);
+                }
+            }
+            self.remotes = combined;
+        }
+        self
     }
 
     /// Resolves the effective lookaside cache directory by checking:
@@ -85,27 +168,34 @@ impl LookasideManager {
     /// 3. Standard system path `/srv/dbs/lookaside` (if existing or parent exists)
     /// 4. Local workspace fallback `data/lookaside`
     pub fn resolve_default(explicit: Option<&Path>) -> Self {
-        if let Some(p) = explicit {
-            return Self::new(p.to_path_buf());
-        }
+        Self::resolve(explicit, None)
+    }
 
-        if let Ok(env_path) = std::env::var("DBS_LOOKASIDE_DIR")
+    /// Resolves root path and applies configured remote lookaside mirrors (prepended to defaults).
+    pub fn resolve(explicit: Option<&Path>, remotes: Option<&[String]>) -> Self {
+        let root = if let Some(p) = explicit {
+            p.to_path_buf()
+        } else if let Ok(env_path) = std::env::var("DBS_LOOKASIDE_DIR")
             && !env_path.trim().is_empty() {
-                return Self::new(PathBuf::from(env_path));
+            PathBuf::from(env_path)
+        } else {
+            let sys_path = Path::new(DEFAULT_LOOKASIDE_PATH);
+            if sys_path.exists() {
+                sys_path.to_path_buf()
+            } else if let Some(parent) = sys_path.parent()
+                && parent.exists() {
+                sys_path.to_path_buf()
+            } else {
+                PathBuf::from(LOCAL_LOOKASIDE_FALLBACK)
             }
+        };
 
-        let sys_path = Path::new(DEFAULT_LOOKASIDE_PATH);
-        if sys_path.exists() {
-            return Self::new(sys_path.to_path_buf());
+        let mgr = Self::new(root);
+        if let Some(r) = remotes {
+            mgr.with_remotes(r)
+        } else {
+            mgr
         }
-
-        // If /srv/dbs exists, use /srv/dbs/lookaside
-        if let Some(parent) = sys_path.parent()
-            && parent.exists() {
-                return Self::new(sys_path.to_path_buf());
-            }
-
-        Self::new(PathBuf::from(LOCAL_LOOKASIDE_FALLBACK))
     }
 
     /// Initializes repository directory structures (.cas/sha512 and pkgs).
@@ -301,7 +391,7 @@ impl LookasideManager {
         }
     }
 
-    /// Downloads a source archive from TacOS, Fedora Rawhide, or CentOS lookaside URLs.
+    /// Downloads a source archive from configured lookaside remote mirrors or defaults.
     fn download_from_remote(
         &self,
         pkg_name: &str,
@@ -309,42 +399,21 @@ impl LookasideManager {
         hash: &str,
         dest: &Path,
     ) -> Result<bool> {
-        let hash_type = if hash.len() == 128 {
-            "sha512"
-        } else if hash.len() == 64 {
-            "sha256"
+        let templates: Vec<LookasideUrlTemplate> = if self.remotes.is_empty() {
+            default_lookaside_templates()
+                .into_iter()
+                .map(LookasideUrlTemplate::new)
+                .collect()
         } else {
-            "md5"
+            self.remotes
+                .iter()
+                .cloned()
+                .map(LookasideUrlTemplate::new)
+                .collect()
         };
 
-        let urls = [
-            // 1. Fedora lookaside with hashtype (modern standard Fedora infrastructure)
-            format!(
-                "https://src.fedoraproject.org/repo/pkgs/{}/{}/{}/{}/{}",
-                pkg_name, filename, hash_type, hash, filename
-            ),
-            // 2. CentOS Stream lookaside with hashtype
-            format!(
-                "https://sources.stream.centos.org/sources/rpms/{}/{}/{}/{}/{}",
-                pkg_name, filename, hash_type, hash, filename
-            ),
-            // 3. Fedora legacy path without hashtype (for older MD5 or historical packages)
-            format!(
-                "https://src.fedoraproject.org/repo/pkgs/{}/{}/{}/{}",
-                pkg_name, filename, hash, filename
-            ),
-            // 4. TacOS lookaside cache (HTTPS / HTTP)
-            format!(
-                "https://repos.tacos.org.mx/sources/{}/{}",
-                pkg_name, filename
-            ),
-            format!(
-                "http://repos.tacos.org.mx/sources/{}/{}",
-                pkg_name, filename
-            ),
-        ];
-
-        for url in &urls {
+        for tmpl in &templates {
+            let url = tmpl.expand(pkg_name, filename, hash);
             debug!("Downloading: curl -f -L -s -S --connect-timeout 10 -o {:?} {}", dest, url);
             let status = Command::new("curl")
                 .arg("-f")
@@ -355,7 +424,7 @@ impl LookasideManager {
                 .arg("10")
                 .arg("-o")
                 .arg(dest)
-                .arg(url)
+                .arg(&url)
                 .status();
 
             if let Ok(st) = status
@@ -760,4 +829,42 @@ mod tests {
         let entries2 = parse_sources_file(&updated).unwrap();
         assert_eq!(entries2.len(), 2);
     }
+
+    #[test]
+    fn test_lookaside_url_template_expansion() {
+        let tmpl = LookasideUrlTemplate::new("https://example.com/repo/{package}/{filename}/{hashtype}/{hash}/{filename}");
+        // Test SHA-512 (128 chars)
+        let hash512 = "a".repeat(128);
+        let url = tmpl.expand("firefox", "firefox-130.tar.xz", &hash512);
+        assert_eq!(url, format!("https://example.com/repo/firefox/firefox-130.tar.xz/sha512/{}/firefox-130.tar.xz", hash512));
+
+        // Test SHA-256 (64 chars)
+        let hash256 = "b".repeat(64);
+        let url2 = tmpl.expand("systemd", "systemd-256.tar.gz", &hash256);
+        assert_eq!(url2, format!("https://example.com/repo/systemd/systemd-256.tar.gz/sha256/{}/systemd-256.tar.gz", hash256));
+
+        // Test MD5 (32 chars)
+        let hash_md5 = "c".repeat(32);
+        let url3 = tmpl.expand("bash", "bash-5.2.tar.gz", &hash_md5);
+        assert_eq!(url3, format!("https://example.com/repo/bash/bash-5.2.tar.gz/md5/{}/bash-5.2.tar.gz", hash_md5));
+
+        // Test simple template without hashtype
+        let simple_tmpl = LookasideUrlTemplate::new("https://repos.tacos.org.mx/sources/{pkg}/{file}");
+        let url4 = simple_tmpl.expand("zstd", "zstd-1.5.7.tar.gz", "anyhash");
+        assert_eq!(url4, "https://repos.tacos.org.mx/sources/zstd/zstd-1.5.7.tar.gz");
+    }
+
+    #[test]
+    fn test_lookaside_manager_with_remotes_prepends() {
+        let mgr = LookasideManager::new(PathBuf::from("/tmp/test-lookaside"));
+        let custom_remotes = vec![
+            "https://internal-mirror.local/sources/{pkg}/{file}".to_string(),
+        ];
+        let mgr = mgr.with_remotes(&custom_remotes);
+        assert_eq!(mgr.remotes[0], "https://internal-mirror.local/sources/{pkg}/{file}");
+        // Defaults must be appended after custom remotes
+        assert!(mgr.remotes.len() > 1);
+        assert!(mgr.remotes.contains(&"https://repos.tacos.org.mx/sources/{package}/{filename}".to_string()));
+    }
 }
+

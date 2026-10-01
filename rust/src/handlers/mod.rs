@@ -32,9 +32,9 @@ use crate::tui::{run_explorer, run_monitor};
 
 /// Dispatches the `explore` subcommand to discover remote packages in dist-git.
 pub async fn handle_explore(args: ExploreArgs, dbs_cfg: &DbsConfig) -> Result<()> {
-    let config = match DistroConfig::from_preset(&args.distro) {
-        Some(cfg) => cfg,
-        None => {
+    let mut config = match dbs_cfg.resolve_distro(&args.distro) {
+        Ok(cfg) => cfg,
+        Err(_) => {
             println!("Unknown distribution preset: '{}'. Available presets:", args.distro);
             for p in DistroConfig::all_presets() {
                 println!("  * {} (branch: {}, api: {})", p.name, p.dist_git_branch, p.api_type);
@@ -42,6 +42,19 @@ pub async fn handle_explore(args: ExploreArgs, dbs_cfg: &DbsConfig) -> Result<()
             return Ok(());
         }
     };
+
+    if let Some(ref tmpl) = args.git_url_template {
+        config.dist_git_url_template = tmpl.clone();
+    }
+    if let Some(ref b) = args.branch {
+        config.dist_git_branch = b.clone();
+    }
+    if let Some(ref u) = args.api_url {
+        config.api_url = Some(u.clone());
+    }
+    if let Some(t) = args.api_type {
+        config.api_type = t;
+    }
 
     let effective_api_key = args.api_key.or_else(|| dbs_cfg.distgit.api_key.clone());
     let client = DistGitClient::new(config.clone()).with_api_key(effective_api_key);
@@ -106,12 +119,29 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             new_origin,
             new_top_origin,
             api_key,
+            git_url_template,
+            branch,
+            lookaside_url,
             packages,
         } => {
             let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
-            let config = DistroConfig::from_preset(&distro)
-                .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
+            let mut config = dbs_cfg.resolve_distro(&distro)?;
+            if let Some(ref tmpl) = git_url_template {
+                config.dist_git_url_template = tmpl.clone();
+            }
+            if let Some(ref b) = branch {
+                config.dist_git_branch = b.clone();
+            }
+            if !lookaside_url.is_empty() {
+                let mut combined = lookaside_url;
+                for u in &config.lookaside_urls {
+                    if !combined.contains(u) {
+                        combined.push(u.clone());
+                    }
+                }
+                config.lookaside_urls = combined;
+            }
             let effective_api_key = api_key.or_else(|| dbs_cfg.distgit.api_key.clone());
             let client = DistGitClient::new(config).with_api_key(effective_api_key);
             let effective_top_origin = new_top_origin.or_else(|| dbs_cfg.distgit.new_top_origin.clone());
@@ -227,8 +257,7 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
 
             println!("Pulling updates for {} repository(ies)...", pkgs_to_pull.len());
-            // Default to Fedora Rawhide config for pulling existing repos
-            let config = DistroConfig::fedora_rawhide();
+            let config = dbs_cfg.resolve_distro(&dbs_cfg.distgit.distro)?;
             let client = DistGitClient::new(config);
 
             for pkg in pkgs_to_pull {
@@ -253,6 +282,9 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             lookaside_dir,
             new_top_origin,
             api_key,
+            git_url_template,
+            branch,
+            lookaside_url,
         } => {
             let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
@@ -262,10 +294,25 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             let effective_top_origin = new_top_origin.or_else(|| dbs_cfg.distgit.new_top_origin.clone());
             let effective_api_key = api_key.or_else(|| dbs_cfg.distgit.api_key.clone());
 
-            let config = DistroConfig::from_preset(&distro)
-                .ok_or_else(|| eyre!("Unknown distribution preset '{}'", distro))?;
+            let mut config = dbs_cfg.resolve_distro(&distro)?;
+            if let Some(ref tmpl) = git_url_template {
+                config.dist_git_url_template = tmpl.clone();
+            }
+            if let Some(ref b) = branch {
+                config.dist_git_branch = b.clone();
+            }
+            if !lookaside_url.is_empty() {
+                let mut combined = lookaside_url;
+                for u in &config.lookaside_urls {
+                    if !combined.contains(u) {
+                        combined.push(u.clone());
+                    }
+                }
+                config.lookaside_urls = combined;
+            }
+
             let client = Arc::new(DistGitClient::new(config).with_api_key(effective_api_key));
-            let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
+            let lookaside_mgr = LookasideManager::resolve(lookaside_dir.as_deref(), Some(&dbs_cfg.effective_lookaside_remotes()));
 
             let query_limit = if all { None } else { Some(limit) };
             if all {
@@ -444,7 +491,7 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
                 Ok(path) => path,
                 Err(_) => {
                     if !target_str.ends_with(".spec") && !target_str.ends_with(".src.rpm") && !target_str.ends_with(".rpm") {
-                        if let Some(config) = DistroConfig::from_preset(&dbs_cfg.distgit.distro) {
+                        if let Ok(config) = dbs_cfg.resolve_distro(&dbs_cfg.distgit.distro) {
                             println!("Target '{}' not found locally in {}. Auto-cloning from {}...", target_str, distgit_dest.display(), dbs_cfg.distgit.distro);
                             let client = DistGitClient::new(config).with_api_key(dbs_cfg.distgit.api_key.clone());
                             let resolved_origin = dbs_cfg.distgit.new_top_origin.as_ref().map(|top| {
@@ -989,8 +1036,10 @@ pub async fn handle_dag(args: DagArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     }
 
     if args.fetch_sources {
-        let lookaside_mgr = LookasideManager::resolve_default(
-            lookaside_dir.as_deref());
+        let lookaside_mgr = LookasideManager::resolve(
+            lookaside_dir.as_deref(),
+            Some(&dbs_cfg.effective_lookaside_remotes()),
+        );
         println!("\n▶ Synchronizing source archives into lookaside cache ({}) \
             for packages in {}...", lookaside_mgr.root.display(),
             path.display());
@@ -1266,8 +1315,11 @@ pub async fn handle_chroot(args: ChrootArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
 /// Dispatches the `lookaside` subcommand for managing source archive storage and synchronization.
 pub async fn handle_lookaside(args: LookasideArgs, dbs_cfg: &DbsConfig) -> Result<()> {
-    let dir = args.dir.or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
-    let mgr = LookasideManager::resolve_default(dir.as_deref());
+    let dir = args.dir
+        .or_else(|| dbs_cfg.lookaside.dir.clone())
+        .or_else(|| Some(dbs_cfg.distgit.lookaside_dir.clone()));
+    let effective_remotes = dbs_cfg.effective_lookaside_remotes();
+    let mgr = LookasideManager::resolve(dir.as_deref(), Some(&effective_remotes));
 
     match args.command {
         LookasideCommands::Upload { file, pkg, spec, no_sources } => {
@@ -1294,7 +1346,12 @@ pub async fn handle_lookaside(args: LookasideArgs, dbs_cfg: &DbsConfig) -> Resul
             }
         }
 
-        LookasideCommands::Get { pkg, file, hash, dest } => {
+        LookasideCommands::Get { pkg, file, hash, dest, remotes } => {
+            let mgr = if !remotes.is_empty() {
+                mgr.with_remotes(&remotes)
+            } else {
+                mgr
+            };
             println!("Retrieving {} ({:.12}...) into {}...", file, hash, dest.display());
             let target_dest = if dest.is_dir() {
                 dest.join(&file)
@@ -1306,7 +1363,12 @@ pub async fn handle_lookaside(args: LookasideArgs, dbs_cfg: &DbsConfig) -> Resul
             println!("✓ Staged: {} ({})", target_dest.display(), mode);
         }
 
-        LookasideCommands::Sync { path, concurrency } => {
+        LookasideCommands::Sync { path, concurrency, remotes } => {
+            let mgr = if !remotes.is_empty() {
+                mgr.with_remotes(&remotes)
+            } else {
+                mgr
+            };
             println!("===========================================================");
             println!(" DBS Dist-git Lookaside Cache Synchronizer");
             println!(" Lookaside Root: {}", mgr.root.display());
@@ -1507,6 +1569,22 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                     println!("    Mock Root:    {}", chroot);
                 }
                 println!();
+            }
+
+            if !dbs_cfg.distros.is_empty() {
+                println!("===========================================================");
+                println!(" Configured Custom Distributions (dbs.toml)");
+                println!("===========================================================");
+                for (key, d) in &dbs_cfg.distros {
+                    println!("  * [{}] Name: {}", key, d.name.as_deref().unwrap_or(key));
+                    if let Some(ref u) = d.git_url { println!("    Dist-Git:     {}", u); }
+                    if let Some(ref b) = d.branch { println!("    Branch:       {}", b); }
+                    if let Some(ref a) = d.api_type { println!("    API Type:     {}", a); }
+                    if !d.lookaside_urls.is_empty() {
+                        println!("    Lookaside:    {}", d.lookaside_urls.join(", "));
+                    }
+                    println!();
+                }
             }
             println!("===========================================================");
 
@@ -1723,7 +1801,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             // 2. Ensure lookaside sources are synchronized for full-distribution builds if needed
             let is_full_dist = tasks.iter().any(|t| t.spec_paths.is_none());
             if is_full_dist {
-                let lookaside_mgr = LookasideManager::resolve_default(lookaside_dir.as_deref());
+                let lookaside_mgr = LookasideManager::resolve(lookaside_dir.as_deref(), Some(&dbs_cfg.effective_lookaside_remotes()));
                 println!("\n▶ Synchronizing source archives into lookaside cache ({})...", lookaside_mgr.root.display());
                 match lookaside_mgr.sync_dir(&path, concurrency).await {
                     Ok(rep) => {

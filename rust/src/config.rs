@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use eyre::{eyre, Result};
 
+use crate::distgit::provider::{ApiType, DistroConfig};
+
 /// Root configuration structure representing `dbs.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[derive(Default)]
@@ -23,7 +25,13 @@ pub struct DbsConfig {
     pub distgit: DistgitConfig,
 
     #[serde(default)]
+    pub lookaside: LookasideConfig,
+
+    #[serde(default)]
     pub distro: DistroSettings,
+
+    #[serde(default)]
+    pub distros: HashMap<String, DistroProfileConfig>,
 
     #[serde(default)]
     pub build: BuildConfig,
@@ -132,6 +140,55 @@ impl Default for ChrootConfig {
     }
 }
 
+/// Settings for dist-git lookaside source cache storage and upstream remote mirrors.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LookasideConfig {
+    /// Optional root directory for lookaside cache (overrides distgit.lookaside_dir if specified).
+    pub dir: Option<PathBuf>,
+
+    /// Ordered remote lookaside URL templates to query when downloading sources (prepended to defaults).
+    #[serde(default)]
+    pub remotes: Vec<String>,
+}
+
+/// Custom distribution profile settings in `dbs.toml` (`[distros.<name>]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DistroProfileConfig {
+    /// Human-readable distribution name.
+    pub name: Option<String>,
+
+    /// Version or release identifier.
+    pub version: Option<String>,
+
+    /// Git clone URL template (supports `{package}` and `{pkg}`).
+    pub git_url: Option<String>,
+
+    /// Default branch to clone/track.
+    pub branch: Option<String>,
+
+    /// Base URL for the lookaside source tarball cache.
+    pub lookaside_cache_url: Option<String>,
+
+    /// Ordered remote lookaside URL templates to query for this distribution.
+    #[serde(default)]
+    pub lookaside_urls: Vec<String>,
+
+    /// Dist-git forge API type (pagure, gitlab, forgejo, repodata, generic-git).
+    pub api_type: Option<ApiType>,
+
+    /// Forge API base URL.
+    pub api_url: Option<String>,
+
+    /// Mock chroot profile name.
+    pub mock_chroot: Option<String>,
+
+    /// Package manager (e.g. rpm, dnf5).
+    pub package_manager: Option<String>,
+
+    /// Target hardware architecture (e.g. x86_64, aarch64).
+    pub architecture: Option<String>,
+}
+
 /// Settings for dist-git synchronization and lookaside cache storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistgitConfig {
@@ -158,6 +215,30 @@ pub struct DistgitConfig {
     /// Optional API key / personal access token for dist-git forge authentication.
     #[serde(default)]
     pub api_key: Option<String>,
+
+    /// Optional custom git clone URL template overriding preset (supports {package}, {pkg}).
+    #[serde(default)]
+    pub url_template: Option<String>,
+
+    /// Optional custom git branch overriding preset.
+    #[serde(default)]
+    pub branch: Option<String>,
+
+    /// Optional dist-git forge API base URL overriding preset.
+    #[serde(default)]
+    pub api_url: Option<String>,
+
+    /// Optional dist-git forge API type overriding preset.
+    #[serde(default)]
+    pub api_type: Option<ApiType>,
+
+    /// Optional primary lookaside cache base URL overriding preset.
+    #[serde(default)]
+    pub lookaside_cache_url: Option<String>,
+
+    /// Additional remote lookaside URL templates to prepend to the default lookaside mirrors.
+    #[serde(default)]
+    pub lookaside_urls: Vec<String>,
 }
 
 fn default_distgit_distro() -> String {
@@ -185,6 +266,12 @@ impl Default for DistgitConfig {
             concurrency: default_workers(),
             new_top_origin: None,
             api_key: None,
+            url_template: None,
+            branch: None,
+            api_url: None,
+            api_type: None,
+            lookaside_cache_url: None,
+            lookaside_urls: Vec::new(),
         }
     }
 }
@@ -339,6 +426,156 @@ impl DbsConfig {
 
         // Fallback to defaults if no configuration file was found
         Ok((DbsConfig::default(), None))
+    }
+
+    /// Computes the effective list of lookaside remote URL templates.
+    ///
+    /// Priority order (prepending custom configuration to defaults):
+    /// 1. `[lookaside].remotes` from configuration
+    /// 2. `[distgit].lookaside_urls` from configuration
+    /// 3. Active distribution profile `[distros.<distro>].lookaside_urls`
+    /// 4. Built-in distribution preset templates / defaults
+    ///
+    /// Duplicates are eliminated while preserving priority ordering.
+    pub fn effective_lookaside_remotes(&self) -> Vec<String> {
+        let mut urls = Vec::new();
+
+        for u in &self.lookaside.remotes {
+            if !urls.contains(u) {
+                urls.push(u.clone());
+            }
+        }
+        for u in &self.distgit.lookaside_urls {
+            if !urls.contains(u) {
+                urls.push(u.clone());
+            }
+        }
+        if let Some(profile) = self.distros.get(&self.distgit.distro) {
+            for u in &profile.lookaside_urls {
+                if !urls.contains(u) {
+                    urls.push(u.clone());
+                }
+            }
+        }
+        if let Some(preset) = DistroConfig::from_preset(&self.distgit.distro) {
+            for u in &preset.lookaside_urls {
+                if !urls.contains(u) {
+                    urls.push(u.clone());
+                }
+            }
+        }
+        for u in crate::lookaside::default_lookaside_templates() {
+            if !urls.contains(&u) {
+                urls.push(u);
+            }
+        }
+
+        urls
+    }
+
+    /// Resolves the comprehensive distribution configuration by merging:
+    /// 1. Built-in distribution preset (if matching)
+    /// 2. Custom distribution profile defined under `[distros.<distro>]`
+    /// 3. Top-level overrides under `[distgit]` (url_template, branch, api_url, api_type, lookaside_cache_url)
+    /// 4. Effective lookaside URL templates prepended to defaults
+    pub fn resolve_distro(&self, distro_name: &str) -> Result<DistroConfig> {
+        let mut cfg = if let Some(preset) = DistroConfig::from_preset(distro_name) {
+            preset
+        } else if let Some(profile) = self.distros.get(distro_name) {
+            DistroConfig {
+                name: profile.name.clone().unwrap_or_else(|| distro_name.to_string()),
+                version: profile.version.clone().unwrap_or_else(|| "custom".to_string()),
+                dist_git_url_template: profile.git_url.clone().unwrap_or_else(|| {
+                    "https://src.fedoraproject.org/rpms/{package}.git".to_string()
+                }),
+                dist_git_branch: profile.branch.clone().unwrap_or_else(|| "rawhide".to_string()),
+                lookaside_cache_url: profile.lookaside_cache_url.clone(),
+                lookaside_urls: profile.lookaside_urls.clone(),
+                api_type: profile.api_type.unwrap_or(ApiType::Pagure),
+                api_url: profile.api_url.clone(),
+                mock_chroot: profile.mock_chroot.clone(),
+                package_manager: profile.package_manager.clone().unwrap_or_else(|| "rpm".to_string()),
+                architecture: profile.architecture.clone().unwrap_or_else(|| self.chroot.arch.clone()),
+            }
+        } else {
+            return Err(eyre!(
+                "Unknown distribution preset or custom profile '{}'. Check dbs.toml [distros] or available presets.",
+                distro_name
+            ));
+        };
+
+        // Merge profile overrides if present (even if distro_name also matched a preset)
+        if let Some(profile) = self.distros.get(distro_name) {
+            if let Some(ref name) = profile.name { cfg.name = name.clone(); }
+            if let Some(ref version) = profile.version { cfg.version = version.clone(); }
+            if let Some(ref git_url) = profile.git_url { cfg.dist_git_url_template = git_url.clone(); }
+            if let Some(ref branch) = profile.branch { cfg.dist_git_branch = branch.clone(); }
+            if let Some(ref lookaside_cache_url) = profile.lookaside_cache_url {
+                cfg.lookaside_cache_url = Some(lookaside_cache_url.clone());
+            }
+            if let Some(api_type) = profile.api_type { cfg.api_type = api_type; }
+            if let Some(ref api_url) = profile.api_url { cfg.api_url = Some(api_url.clone()); }
+            if let Some(ref mock_chroot) = profile.mock_chroot { cfg.mock_chroot = Some(mock_chroot.clone()); }
+            if let Some(ref pkg_mgr) = profile.package_manager { cfg.package_manager = pkg_mgr.clone(); }
+            if let Some(ref arch) = profile.architecture { cfg.architecture = arch.clone(); }
+        }
+
+        // Apply top-level distgit overrides if distro matches self.distgit.distro
+        if distro_name == self.distgit.distro {
+            if let Some(ref tmpl) = self.distgit.url_template {
+                cfg.dist_git_url_template = tmpl.clone();
+            }
+            if let Some(ref branch) = self.distgit.branch {
+                cfg.dist_git_branch = branch.clone();
+            }
+            if let Some(ref api_url) = self.distgit.api_url {
+                cfg.api_url = Some(api_url.clone());
+            }
+            if let Some(api_type) = self.distgit.api_type {
+                cfg.api_type = api_type;
+            }
+            if let Some(ref lookaside_cache_url) = self.distgit.lookaside_cache_url {
+                cfg.lookaside_cache_url = Some(lookaside_cache_url.clone());
+            }
+        }
+
+        // Compute combined lookaside URLs:
+        // Priority order (TOML remotes prepended to preset defaults):
+        // 1. [lookaside].remotes
+        // 2. [distgit].lookaside_urls
+        // 3. [distros.<distro>].lookaside_urls
+        // 4. cfg.lookaside_urls (from preset or defaults)
+        let mut effective_lookaside = Vec::new();
+        for u in &self.lookaside.remotes {
+            if !effective_lookaside.contains(u) {
+                effective_lookaside.push(u.clone());
+            }
+        }
+        for u in &self.distgit.lookaside_urls {
+            if !effective_lookaside.contains(u) {
+                effective_lookaside.push(u.clone());
+            }
+        }
+        if let Some(profile) = self.distros.get(distro_name) {
+            for u in &profile.lookaside_urls {
+                if !effective_lookaside.contains(u) {
+                    effective_lookaside.push(u.clone());
+                }
+            }
+        }
+        for u in &cfg.lookaside_urls {
+            if !effective_lookaside.contains(u) {
+                effective_lookaside.push(u.clone());
+            }
+        }
+        for u in crate::lookaside::default_lookaside_templates() {
+            if !effective_lookaside.contains(&u) {
+                effective_lookaside.push(u);
+            }
+        }
+
+        cfg.lookaside_urls = effective_lookaside;
+        Ok(cfg)
     }
 
     /// Generates a well-documented starter `dbs.toml` configuration template.
@@ -508,6 +745,53 @@ mod tests {
         assert!(!parsed.build.skip_existing);
         assert!(parsed.build.nocheck);
         assert_eq!(parsed.build.nocheck_packages, vec!["cockpit", "git"]);
+    }
+
+    #[test]
+    fn test_deserialize_lookaside_and_distros() {
+        let toml_data = r#"
+        [distgit]
+        distro = "my-custom-distro"
+        url_template = "https://git.example.com/rpms/{package}.git"
+        branch = "eln"
+
+        [lookaside]
+        remotes = [
+            "https://cache1.example.com/sources/{package}/{filename}",
+            "https://cache2.example.com/sources/{package}/{filename}/{hashtype}/{hash}/{filename}"
+        ]
+
+        [distros.my-custom-distro]
+        name = "My Custom Distro"
+        version = "1.0"
+        git_url = "https://git.example.com/rpms/{package}.git"
+        branch = "eln"
+        lookaside_urls = [
+            "https://distro-cache.example.com/{package}/{filename}"
+        ]
+        api_type = "forgejo"
+        api_url = "https://git.example.com/api/v1"
+        "#;
+
+        let parsed: DbsConfig = toml::from_str(toml_data).expect("Failed to parse TOML with lookaside and distros");
+        assert_eq!(parsed.distgit.url_template.as_deref(), Some("https://git.example.com/rpms/{package}.git"));
+        assert_eq!(parsed.distgit.branch.as_deref(), Some("eln"));
+        assert_eq!(parsed.lookaside.remotes.len(), 2);
+        assert!(parsed.distros.contains_key("my-custom-distro"));
+
+        let resolved = parsed.resolve_distro("my-custom-distro").expect("Failed to resolve custom distro");
+        assert_eq!(resolved.name, "My Custom Distro");
+        assert_eq!(resolved.dist_git_branch, "eln");
+        assert_eq!(resolved.api_type, ApiType::Forgejo);
+
+        // Verify that lookaside remotes are PREPENDED in priority order:
+        // 1. [lookaside].remotes
+        // 2. [distros.my-custom-distro].lookaside_urls
+        // 3. Defaults
+        assert_eq!(resolved.lookaside_urls[0], "https://cache1.example.com/sources/{package}/{filename}");
+        assert_eq!(resolved.lookaside_urls[1], "https://cache2.example.com/sources/{package}/{filename}/{hashtype}/{hash}/{filename}");
+        assert_eq!(resolved.lookaside_urls[2], "https://distro-cache.example.com/{package}/{filename}");
+        assert!(resolved.lookaside_urls.contains(&"https://repos.tacos.org.mx/sources/{package}/{filename}".to_string()));
     }
 }
 

@@ -14,6 +14,7 @@ use tokio::sync::Semaphore;
 
 use crate::distgit::provider::{ApiType, DistroConfig};
 use crate::distgit::spec::{parse_spec_file, SpecMetadata};
+use crate::lookaside::LookasideUrlTemplate;
 
 /// Discovered package or project from dist-git search or remote API queries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -557,9 +558,20 @@ impl DistGitClient {
             return Ok(Vec::new());
         }
 
-        let cache_base = match &self.config.lookaside_cache_url {
-            Some(u) => u.as_str(),
-            None => return Ok(Vec::new()),
+        let candidate_templates: Vec<String> = if !self.config.lookaside_urls.is_empty() {
+            self.config.lookaside_urls.clone()
+        } else if let Some(cache_base) = &self.config.lookaside_cache_url {
+            match self.config.api_type {
+                ApiType::Pagure | ApiType::GitLab => vec![
+                    format!("{}/{{package}}/{{filename}}/{{hashtype}}/{{hash}}/{{filename}}", cache_base),
+                    format!("{}/{{package}}/{{filename}}/{{hash}}/{{filename}}", cache_base),
+                ],
+                _ => vec![
+                    format!("{}/{{package}}/{{filename}}", cache_base),
+                ],
+            }
+        } else {
+            return Ok(Vec::new());
         };
 
         let content = fs::read_to_string(&sources_file)?;
@@ -591,27 +603,49 @@ impl DistGitClient {
                 continue;
             }
 
-            let source_url = match self.config.api_type {
-                ApiType::Pagure => {
-                    format!("{}/{}/{}/sha512/{}/{}", cache_base, package_name, filename, hash, filename)
-                }
-                ApiType::GitLab => {
-                    format!("{}/{}/{}/sha512/{}/{}", cache_base, package_name, filename, hash, filename)
-                }
-                _ => {
-                    format!("{}/{}/{}", cache_base, package_name, filename)
-                }
-            };
+            let mut download_ok = false;
+            let mut attempted_urls = Vec::new();
 
-            let resp = self.http.get(&source_url).send().await?;
-            if !resp.status().is_success() {
-                return Err(eyre!("Failed to download {} from lookaside: {}", filename, resp.status()));
+            for tmpl_str in &candidate_templates {
+                let tmpl = LookasideUrlTemplate::new(tmpl_str);
+                let source_url = tmpl.expand(package_name, filename, hash);
+                attempted_urls.push(source_url.clone());
+
+                let resp = match self.http.get(&source_url).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        log::debug!("HTTP connection error for {}: {}", source_url, e);
+                        continue;
+                    }
+                };
+
+                if !resp.status().is_success() {
+                    log::debug!("HTTP status {} for {}", resp.status(), source_url);
+                    continue;
+                }
+
+                let bytes = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::debug!("Failed to read response body for {}: {}", source_url, e);
+                        continue;
+                    }
+                };
+
+                let mut file = File::create(&dest_file)?;
+                let mut cursor = std::io::Cursor::new(bytes);
+                copy(&mut cursor, &mut file)?;
+                download_ok = true;
+                break;
             }
 
-            let bytes = resp.bytes().await?;
-            let mut file = File::create(&dest_file)?;
-            let mut cursor = std::io::Cursor::new(bytes);
-            copy(&mut cursor, &mut file)?;
+            if !download_ok {
+                return Err(eyre!(
+                    "Failed to download '{}' from any configured lookaside mirror. Attempted URLs:\n{}",
+                    filename,
+                    attempted_urls.iter().map(|u| format!("  - {}", u)).collect::<Vec<_>>().join("\n")
+                ));
+            }
 
             downloaded.push(dest_file);
         }

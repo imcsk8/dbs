@@ -43,6 +43,22 @@ new_top_origin = "https://codeberg.org/imcsk8/tacos"
 # Optional API token / key for authenticating with dist-git forge APIs
 # api_key = ""
 
+# Custom dist-git clone URL template and branch overrides (optional)
+# url_template = "https://src.fedoraproject.org/rpms/{package}.git"
+# branch = "rawhide"
+
+[lookaside]
+# Dist-git lookaside source cache directory
+dir = "/srv/dbs/lookaside"
+
+# Remote lookaside mirrors (queried in priority order before built-in fallbacks)
+# Supports placeholders: {package}, {pkg}, {filename}, {file}, {hash}, {hashtype}
+remotes = [
+    "https://repos.tacos.org.mx/sources/{package}/{filename}",
+    "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}",
+    "https://sources.stream.centos.org/sources/rpms/{package}/{filename}/{hashtype}/{hash}/{filename}",
+]
+
 [distro]
 # Target distribution identifier
 name = "tacos-stable-x86_64"

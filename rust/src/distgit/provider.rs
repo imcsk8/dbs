@@ -6,17 +6,28 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported API backends for querying dist-git projects and packages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum ApiType {
     /// Pagure API (e.g. src.fedoraproject.org).
+    #[clap(name = "pagure")]
+    #[serde(rename = "pagure")]
     Pagure,
     /// GitLab API (e.g. gitlab.com/redhat/centos-stream/rpms).
+    #[clap(name = "gitlab")]
+    #[serde(rename = "gitlab")]
     GitLab,
     /// Forgejo / Gitea API (e.g. codeberg.org).
+    #[clap(name = "forgejo")]
+    #[serde(rename = "forgejo")]
     Forgejo,
     /// Direct repository metadata (repomd.xml).
+    #[clap(name = "repodata")]
+    #[serde(rename = "repodata")]
     Repodata,
     /// Generic Git server without a search API.
+    #[clap(name = "generic-git")]
+    #[serde(rename = "generic-git")]
     GenericGit,
 }
 
@@ -39,12 +50,15 @@ pub struct DistroConfig {
     pub name: String,
     /// Version or release identifier (e.g. "rawhide", "10", "9").
     pub version: String,
-    /// Template for constructing git clone URLs. Supports `{package}` placeholder.
+    /// Template for constructing git clone URLs. Supports `{package}` and `{pkg}` placeholders.
     pub dist_git_url_template: String,
     /// Default git branch to clone/track.
     pub dist_git_branch: String,
-    /// Base URL for the lookaside source tarball cache.
+    /// Base URL for the lookaside source tarball cache (legacy compatibility).
     pub lookaside_cache_url: Option<String>,
+    /// Configured remote lookaside URL templates for source tarball retrieval.
+    #[serde(default)]
+    pub lookaside_urls: Vec<String>,
     /// Type of API used for repository discovery.
     pub api_type: ApiType,
     /// Base API URL for project search and catalog discovery.
@@ -60,7 +74,9 @@ pub struct DistroConfig {
 impl DistroConfig {
     /// Generates the exact clone URL for a given package name.
     pub fn git_url_for_package(&self, package_name: &str) -> String {
-        self.dist_git_url_template.replace("{package}", package_name)
+        self.dist_git_url_template
+            .replace("{package}", package_name)
+            .replace("{pkg}", package_name)
     }
 
     /// Presets for Fedora Rawhide dist-git.
@@ -71,6 +87,11 @@ impl DistroConfig {
             dist_git_url_template: "https://src.fedoraproject.org/rpms/{package}.git".to_string(),
             dist_git_branch: "rawhide".to_string(),
             lookaside_cache_url: Some("https://src.fedoraproject.org/repo/pkgs".to_string()),
+            lookaside_urls: vec![
+                "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+                "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hash}/{filename}".to_string(),
+                "https://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+            ],
             api_type: ApiType::Pagure,
             api_url: Some("https://src.fedoraproject.org/api/0".to_string()),
             mock_chroot: Some("fedora-rawhide-x86_64".to_string()),
@@ -87,6 +108,11 @@ impl DistroConfig {
             dist_git_url_template: "https://gitlab.com/redhat/centos-stream/rpms/{package}.git".to_string(),
             dist_git_branch: "c10s".to_string(),
             lookaside_cache_url: Some("https://sources.stream.centos.org/sources/rpms".to_string()),
+            lookaside_urls: vec![
+                "https://sources.stream.centos.org/sources/rpms/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+                "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+                "https://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+            ],
             api_type: ApiType::GitLab,
             api_url: Some("https://gitlab.com/api/v4/groups/8794173/projects".to_string()),
             mock_chroot: Some("centos-stream-10-x86_64".to_string()),
@@ -103,6 +129,11 @@ impl DistroConfig {
             dist_git_url_template: "https://gitlab.com/redhat/centos-stream/rpms/{package}.git".to_string(),
             dist_git_branch: "c9s".to_string(),
             lookaside_cache_url: Some("https://sources.stream.centos.org/sources/rpms".to_string()),
+            lookaside_urls: vec![
+                "https://sources.stream.centos.org/sources/rpms/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+                "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+                "https://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+            ],
             api_type: ApiType::GitLab,
             api_url: Some("https://gitlab.com/api/v4/groups/8794173/projects".to_string()),
             mock_chroot: Some("centos-stream-9-x86_64".to_string()),
@@ -119,6 +150,12 @@ impl DistroConfig {
             dist_git_url_template: "https://codeberg.org/imcsk8/tacos.git".to_string(),
             dist_git_branch: "master".to_string(),
             lookaside_cache_url: Some("https://repos.tacos.org.mx/sources".to_string()),
+            lookaside_urls: vec![
+                "https://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+                "http://repos.tacos.org.mx/sources/{package}/{filename}".to_string(),
+                "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+                "https://sources.stream.centos.org/sources/rpms/{package}/{filename}/{hashtype}/{hash}/{filename}".to_string(),
+            ],
             api_type: ApiType::Forgejo,
             api_url: Some("https://codeberg.org/api/v1".to_string()),
             mock_chroot: Some("tacos-rolling-x86_64".to_string()),
