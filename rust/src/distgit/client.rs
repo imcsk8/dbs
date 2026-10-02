@@ -361,11 +361,11 @@ impl DistGitClient {
 
     /// Clones or pulls a single dist-git repository into the destination directory.
     pub fn clone_or_pull(&self, package_name: &str, dest_dir: &Path) -> Result<GitRepoStatus> {
-        self.clone_or_pull_as(package_name, package_name, dest_dir, false, None)
+        self.clone_or_pull_as(package_name, package_name, dest_dir, false, None, false)
     }
 
     /// Clones or pulls a dist-git repository under a custom target name, with optional
-    /// spec renaming and origin remote reconfiguration.
+    /// spec renaming, origin remote reconfiguration, and upstream synchronization mode.
     pub fn clone_or_pull_as(
         &self,
         source_package: &str,
@@ -373,6 +373,7 @@ impl DistGitClient {
         dest_dir: &Path,
         rename_spec: bool,
         new_origin: Option<&str>,
+        use_upstream: bool,
     ) -> Result<GitRepoStatus> {
         let pkg_dir = dest_dir.join(target_name);
         let git_url = self.config.git_url_for_package(source_package);
@@ -380,32 +381,92 @@ impl DistGitClient {
 
         let freshly_cloned = if pkg_dir.join(".git").exists() {
             // Determine active remote name (origin or upstream)
-            let fetch_status = Command::new("git")
-                .arg("-C")
-                .arg(&pkg_dir)
-                .arg("fetch")
-                .arg("--depth=1")
-                .arg("origin")
-                .arg(branch)
-                .status();
+            let remote_name = if use_upstream {
+                // Ensure upstream remote exists and points to git_url
+                let remotes_output = Command::new("git")
+                    .arg("-C")
+                    .arg(&pkg_dir)
+                    .arg("remote")
+                    .output();
+                let remotes_str = remotes_output
+                    .as_ref()
+                    .map(|o| String::from_utf8_lossy(&o.stdout))
+                    .unwrap_or_default();
+                let remotes: Vec<&str> = remotes_str.lines().map(|l| l.trim()).collect();
 
-            let remote_name = match fetch_status {
-                Ok(s) if s.success() => "origin",
-                _ => {
-                    let upstream_status = Command::new("git")
+                let target_remote = if remotes.contains(&"upstream") {
+                    let _ = Command::new("git")
                         .arg("-C")
                         .arg(&pkg_dir)
-                        .arg("fetch")
-                        .arg("--depth=1")
+                        .arg("remote")
+                        .arg("set-url")
                         .arg("upstream")
-                        .arg(branch)
-                        .status()?;
-                    if !upstream_status.success() {
-                        return Err(eyre!("git fetch failed for {} on branch {}", source_package, branch));
-                    }
+                        .arg(&git_url)
+                        .status();
                     "upstream"
+                } else if remotes.contains(&"origin") && new_origin.is_none() {
+                    // If no new_origin was configured, origin itself is the upstream clone
+                    "origin"
+                } else {
+                    let _ = Command::new("git")
+                        .arg("-C")
+                        .arg(&pkg_dir)
+                        .arg("remote")
+                        .arg("add")
+                        .arg("upstream")
+                        .arg(&git_url)
+                        .status();
+                    "upstream"
+                };
+
+                let upstream_status = Command::new("git")
+                    .arg("-C")
+                    .arg(&pkg_dir)
+                    .arg("fetch")
+                    .arg("--depth=1")
+                    .arg(target_remote)
+                    .arg(branch)
+                    .status()?;
+
+                if !upstream_status.success() {
+                    return Err(eyre!("git fetch failed for {} from {} on branch {}", source_package, target_remote, branch));
+                }
+                target_remote
+            } else {
+                let fetch_status = Command::new("git")
+                    .arg("-C")
+                    .arg(&pkg_dir)
+                    .arg("fetch")
+                    .arg("--depth=1")
+                    .arg("origin")
+                    .arg(branch)
+                    .status();
+
+                match fetch_status {
+                    Ok(s) if s.success() => "origin",
+                    _ => {
+                        let upstream_status = Command::new("git")
+                            .arg("-C")
+                            .arg(&pkg_dir)
+                            .arg("fetch")
+                            .arg("--depth=1")
+                            .arg("upstream")
+                            .arg(branch)
+                            .status()?;
+                        if !upstream_status.success() {
+                            return Err(eyre!("git fetch failed for {} on branch {}", source_package, branch));
+                        }
+                        "upstream"
+                    }
                 }
             };
+
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&pkg_dir)
+                .arg("checkout")
+                .arg(branch)
+                .status();
 
             let reset_status = Command::new("git")
                 .arg("-C")
@@ -498,6 +559,7 @@ impl DistGitClient {
         dest_dir: PathBuf,
         concurrency: usize,
         new_top_origin: Option<String>,
+        use_upstream: bool,
     ) -> tokio::sync::mpsc::Receiver<(usize, usize, Result<GitRepoStatus>)> {
         let total = packages.len();
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency * 2);
@@ -524,7 +586,7 @@ impl DistGitClient {
                             format!("{}/{}", top.trim_end_matches('/'), pkg)
                         }
                     });
-                    let res = client.clone_or_pull_as(&pkg, &pkg, &dest, false, origin_url.as_deref());
+                    let res = client.clone_or_pull_as(&pkg, &pkg, &dest, false, origin_url.as_deref(), use_upstream);
                     drop(permit);
                     let idx = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     let _ = tx_clone.blocking_send((idx, total, res));
@@ -542,8 +604,9 @@ impl DistGitClient {
         dest_dir: PathBuf,
         concurrency: usize,
         new_top_origin: Option<String>,
+        use_upstream: bool,
     ) -> Vec<Result<GitRepoStatus>> {
-        let mut rx = self.sync_batch_stream(packages, dest_dir, concurrency, new_top_origin).await;
+        let mut rx = self.sync_batch_stream(packages, dest_dir, concurrency, new_top_origin, use_upstream).await;
         let mut results = Vec::new();
         while let Some((_, _, res)) = rx.recv().await {
             results.push(res);
@@ -765,5 +828,66 @@ mod tests {
         let config = DistroConfig::fedora_rawhide();
         let client = DistGitClient::new(config).with_api_key(Some("my_test_key".to_string()));
         assert_eq!(client.api_key.as_deref(), Some("my_test_key"));
+    }
+
+    #[test]
+    fn test_clone_or_pull_as_use_upstream() -> Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let upstream_dir = temp_dir.path().join("upstream_repo.git");
+        let origin_dir = temp_dir.path().join("origin_repo.git");
+        let dest_dir = temp_dir.path().join("dest");
+        fs::create_dir_all(&dest_dir)?;
+
+        // Initialize bare upstream repository
+        Command::new("git").args(["init", "--bare", "-b", "rawhide"]).arg(&upstream_dir).status()?;
+
+        // Create initial commit in upstream
+        let work_upstream = temp_dir.path().join("work_upstream");
+        fs::create_dir_all(&work_upstream)?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["init", "-b", "rawhide"]).status()?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["config", "user.name", "TestUser"]).status()?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["config", "user.email", "test@example.com"]).status()?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["remote", "add", "origin"]).arg(&upstream_dir).status()?;
+        fs::write(work_upstream.join("testpkg.spec"), "Name: testpkg\nVersion: 1.0\nRelease: 1\nSummary: Test\nLicense: MIT\n%description\nTest\n")?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["add", "."]).status()?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["commit", "-m", "upstream commit 1"]).status()?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["push", "-u", "origin", "rawhide"]).status()?;
+
+        // Clone to bare origin repository
+        Command::new("git").args(["clone", "--bare", "-b", "rawhide"]).arg(&upstream_dir).arg(&origin_dir).status()?;
+
+        // Create client pointing to upstream repo as template
+        let mut config = DistroConfig::fedora_rawhide();
+        config.dist_git_branch = "rawhide".to_string();
+        config.dist_git_url_template = format!("{}/{{package}}.git", temp_dir.path().display()).replace("testpkg.git", "upstream_repo.git");
+        // Specifically configure exact URL
+        config.dist_git_url_template = upstream_dir.display().to_string();
+        let client = DistGitClient::new(config);
+
+        // Initial clone into dest_dir
+        let status1 = client.clone_or_pull_as("testpkg", "testpkg", &dest_dir, false, Some(&origin_dir.display().to_string()), false)?;
+        assert_eq!(status1.package_name, "testpkg");
+
+        // Verify remotes
+        let pkg_dir = dest_dir.join("testpkg");
+        let remotes_out = Command::new("git").arg("-C").arg(&pkg_dir).arg("remote").output()?;
+        let remotes_str = String::from_utf8_lossy(&remotes_out.stdout);
+        assert!(remotes_str.contains("origin"));
+        assert!(remotes_str.contains("upstream"));
+
+        // Commit change in upstream
+        fs::write(work_upstream.join("testpkg.spec"), "Name: testpkg\nVersion: 2.0\nRelease: 1\nSummary: Upstream V2\nLicense: MIT\n%description\nTest\n")?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["commit", "-am", "upstream commit 2"]).status()?;
+        Command::new("git").args(["-C"]).arg(&work_upstream).args(["push", "origin", "rawhide"]).status()?;
+
+        let upstream_rev = Command::new("git").args(["-C"]).arg(&work_upstream).args(["rev-parse", "HEAD"]).output()?;
+        let upstream_hash = String::from_utf8_lossy(&upstream_rev.stdout).trim().to_string();
+
+        // Sync with use_upstream = true
+        let status_upstream = client.clone_or_pull_as("testpkg", "testpkg", &dest_dir, false, None, true)?;
+        assert_eq!(status_upstream.commit_hash, upstream_hash);
+        assert_eq!(status_upstream.spec_meta.version, "2.0");
+
+        Ok(())
     }
 }

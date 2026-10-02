@@ -220,7 +220,7 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
                     None
                 };
 
-                match client.clone_or_pull_as(source_pkg, target_name, &dest, rename_spec, resolved_origin.as_deref()) {
+                match client.clone_or_pull_as(source_pkg, target_name, &dest, rename_spec, resolved_origin.as_deref(), false) {
                     Ok(status) => {
                         println!("✓ Cloned {} -> {} (branch: {}, commit: {:.8})", source_pkg, status.package_name, status.branch, status.commit_hash);
                         println!("  Spec: {} ({}-{})", status.spec_path.display(), status.spec_meta.version, status.spec_meta.release);
@@ -234,7 +234,7 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
         }
 
-        DistgitCommands::Pull { dest, packages } => {
+        DistgitCommands::Pull { dest, upstream, packages } => {
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
             let pkgs_to_pull = if packages.is_empty() {
                 let mut found = Vec::new();
@@ -256,12 +256,13 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
                 return Ok(());
             }
 
-            println!("Pulling updates for {} repository(ies)...", pkgs_to_pull.len());
+            let remote_desc = if upstream { "upstream remote" } else { "origin (with upstream fallback)" };
+            println!("Pulling updates for {} repository(ies) from {}...", pkgs_to_pull.len(), remote_desc);
             let config = dbs_cfg.resolve_distro(&dbs_cfg.distgit.distro)?;
             let client = DistGitClient::new(config);
 
             for pkg in pkgs_to_pull {
-                match client.clone_or_pull(&pkg, &dest) {
+                match client.clone_or_pull_as(&pkg, &pkg, &dest, false, None, upstream) {
                     Ok(status) => {
                         println!("✓ Updated {} (branch: {}, commit: {:.8})", pkg, status.branch, status.commit_hash);
                     }
@@ -275,6 +276,7 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             dest,
             concurrency,
             sources,
+            upstream,
             search,
             limit,
             all,
@@ -285,6 +287,7 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             git_url_template,
             branch,
             lookaside_url,
+            packages,
         } => {
             let distro = distro.unwrap_or_else(|| dbs_cfg.distgit.distro.clone());
             let dest = dest.unwrap_or_else(|| dbs_cfg.distgit.dest.clone());
@@ -314,17 +317,22 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
             let client = Arc::new(DistGitClient::new(config).with_api_key(effective_api_key));
             let lookaside_mgr = LookasideManager::resolve(lookaside_dir.as_deref(), Some(&dbs_cfg.effective_lookaside_remotes()));
 
-            let query_limit = if all { None } else { Some(limit) };
-            if all {
-                println!("Discovering all packages in {} across all pages...", distro);
+            let pkg_names: Vec<String> = if !packages.is_empty() {
+                packages
             } else {
-                println!("Discovering packages in {} matching query '{:?}' (limit: {})...", distro, search, limit);
-            }
-            let projects = client.explore(search.as_deref(), query_limit).await?;
-            if projects.is_empty() {
-                println!("No packages found to synchronize.");
-                return Ok(());
-            }
+                let query_limit = if all { None } else { Some(limit) };
+                if all {
+                    println!("Discovering all packages in {} across all pages...", distro);
+                } else {
+                    println!("Discovering packages in {} matching query '{:?}' (limit: {})...", distro, search, limit);
+                }
+                let projects = client.explore(search.as_deref(), query_limit).await?;
+                if projects.is_empty() {
+                    println!("No packages found to synchronize.");
+                    return Ok(());
+                }
+                projects.into_iter().map(|p| p.name).collect()
+            };
 
             let mut db_conn = if record_db {
                 match db::establish_connection_with_url(dbs_cfg.database.url.as_deref()) {
@@ -341,14 +349,14 @@ pub async fn handle_distgit(args: DistgitArgs, dbs_cfg: &DbsConfig) -> Result<()
                 None
             };
 
-            let pkg_names: Vec<String> = projects.into_iter().map(|p| p.name).collect();
             let total = pkg_names.len();
-            println!("Synchronizing {} repository(ies) with {} workers into {}...", total, concurrency, dest.display());
+            let remote_desc = if upstream { "upstream remote" } else { "origin (with upstream fallback)" };
+            println!("Synchronizing {} repository(ies) with {} workers from {} into {}...", total, concurrency, remote_desc, dest.display());
             if let Some(top) = &effective_top_origin {
                 println!("Automatically configuring new origin remotes based on: {}/<package>", top.trim_end_matches('/'));
             }
 
-            let mut rx = client.clone().sync_batch_stream(pkg_names, dest.clone(), concurrency, effective_top_origin.clone()).await;
+            let mut rx = client.clone().sync_batch_stream(pkg_names, dest.clone(), concurrency, effective_top_origin.clone(), upstream).await;
             let mut success_count = 0;
 
             while let Some((idx, total_pkgs, res)) = rx.recv().await {
@@ -501,7 +509,7 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
                                     format!("{}/{}", top.trim_end_matches('/'), target_str)
                                 }
                             });
-                            match client.clone_or_pull_as(&target_str, &target_str, distgit_dest, false, resolved_origin.as_deref()) {
+                            match client.clone_or_pull_as(&target_str, &target_str, distgit_dest, false, resolved_origin.as_deref(), false) {
                                 Ok(status) => {
                                     println!("✓ Cloned {} -> {} (branch: {}, commit: {:.8})", target_str, status.package_name, status.branch, status.commit_hash);
                                     status.spec_path

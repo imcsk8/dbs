@@ -208,6 +208,10 @@ pub enum DistgitCommands {
         #[arg(short = 'o', long)]
         dest: Option<PathBuf>,
 
+        /// Synchronize directly from the upstream remote rather than origin.
+        #[arg(long)]
+        upstream: bool,
+
         /// Specific package names to pull (or all if omitted).
         packages: Vec<String>,
     },
@@ -229,6 +233,10 @@ pub enum DistgitCommands {
         /// Also download referenced upstream source archives from lookaside cache.
         #[arg(long)]
         sources: bool,
+
+        /// Synchronize directly from the upstream remote (e.g. Fedora Rawhide) rather than origin.
+        #[arg(long)]
+        upstream: bool,
 
         /// Specific package names to sync (if omitted, discovers packages matching search).
         #[arg(short, long)]
@@ -269,6 +277,10 @@ pub enum DistgitCommands {
         /// Additional lookaside remote URL template(s) to prepend.
         #[arg(long = "lookaside-url")]
         lookaside_url: Vec<String>,
+
+        /// Specific package names to synchronize (if specified, bypasses search/discovery).
+        #[arg(name = "PACKAGE")]
+        packages: Vec<String>,
     },
 
     /// Inspect a `.spec` file or local dist-git repository and display parsed metadata.
@@ -1136,6 +1148,48 @@ mod tests {
                 assert_eq!(args.nocheck_packages, vec!["cockpit", "git", "mutter"]);
             }
             _ => panic!("Expected Commands::Retry"),
+        }
+    }
+
+    #[test]
+    fn test_cli_distgit_sync_upstream_flag() {
+        let cli = Cli::try_parse_from(["dbs", "distgit", "sync", "--upstream", "firefox"]).unwrap();
+        match cli.command {
+            Commands::Distgit(args) => match args.command {
+                DistgitCommands::Sync { upstream, packages, .. } => {
+                    assert!(upstream);
+                    assert_eq!(packages, vec!["firefox"]);
+                }
+                _ => panic!("Expected DistgitCommands::Sync"),
+            },
+            _ => panic!("Expected Commands::Distgit"),
+        }
+
+        let cli_default = Cli::try_parse_from(["dbs", "distgit", "sync"]).unwrap();
+        match cli_default.command {
+            Commands::Distgit(args) => match args.command {
+                DistgitCommands::Sync { upstream, packages, .. } => {
+                    assert!(!upstream);
+                    assert!(packages.is_empty());
+                }
+                _ => panic!("Expected DistgitCommands::Sync"),
+            },
+            _ => panic!("Expected Commands::Distgit"),
+        }
+    }
+
+    #[test]
+    fn test_cli_distgit_pull_upstream_flag() {
+        let cli = Cli::try_parse_from(["dbs", "distgit", "pull", "--upstream", "bash"]).unwrap();
+        match cli.command {
+            Commands::Distgit(args) => match args.command {
+                DistgitCommands::Pull { upstream, packages, .. } => {
+                    assert!(upstream);
+                    assert_eq!(packages, vec!["bash"]);
+                }
+                _ => panic!("Expected DistgitCommands::Pull"),
+            },
+            _ => panic!("Expected Commands::Distgit"),
         }
     }
 }

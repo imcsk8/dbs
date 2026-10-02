@@ -99,14 +99,20 @@ stage_order = ["bootstrap", "system", "utilities", "desktop"]
 bootstrap = [
     "filesystem",
     "setup",
+    "tacos-release",
     "glibc",
     "binutils",
     "gcc",
     "bash",
     "coreutils",
+    "grep",
+    "xz",
+    "gettext",
+    "make",
+    "fmt",
+    "sdbus-cpp",
     "rpm",
     "dnf5",
-    "make",
 ]
 
 # Stage 2: Core system runtime and administration
@@ -119,6 +125,11 @@ system = [
     "audit",
     "kmod",
     "iproute",
+    "lvm2",
+    "fuse3",
+    "efi-rpm-macros",
+    "shim",
+    "grub2",
 ]
 
 # Stage 3: Base utilities, networking, and server administration
