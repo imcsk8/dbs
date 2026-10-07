@@ -620,4 +620,7 @@ dbs retry <pkg> -j 28
 
 # 4. Resume full distribution build (skips already built packages)
 ./build_tacos.sh
+
+# 5. Bulk promote (BTRFS CoW), GPG sign, and index all finished packages into public distro
+make distro-publish
 ```

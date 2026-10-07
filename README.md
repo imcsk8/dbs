@@ -228,6 +228,10 @@ GPG signing, and web serving:
 # Compile packages in topological DAG order and publish to the repository
 ./bin/dbs distro build tacos-stable-x86_64 --path /srv/dbs/tacos/rpm -j 4
 
+# Bulk promote (BTRFS CoW), GPG sign, and index all staged packages:
+make distro-publish
+# (or ./scripts/promote_and_sign.sh)
+
 # Check repository inventory, package counts, and repodata health
 ./bin/dbs distro status tacos-stable-x86_64
 

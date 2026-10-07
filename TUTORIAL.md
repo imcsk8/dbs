@@ -990,6 +990,32 @@ Computes topological DAG layers, fetches missing lookaside sources via BTRFS CoW
   --sign-key release@tacos.org.mx
 ```
 
+#### High-Throughput Bulk Promotion & Signing Recipe (Make & Script)
+
+For high-volume builds with tens of thousands of RPMs across worker directories (`staging/worker-*/`) and dynamic staging (`staging/rpms/x86_64/`), use the bulk promotion recipe. It leverages BTRFS CoW reflinks (`cp -u --reflink=auto`), fast header-level unsigned RPM detection, parallel `rpmsign` workers, incremental `createrepo_c`, and GPG detached metadata signing:
+
+```bash
+# 1. Full bulk workflow: harvest workers, CoW promote, sign unsigned RPMs, update repodata & repo file
+make distro-publish
+# Equivalent to: ./scripts/promote_and_sign.sh
+
+# 2. Only promote packages using BTRFS CoW (instant, 0 extra disk, safe while builds run):
+make distro-promote
+# Equivalent to: ./scripts/promote_and_sign.sh --promote-only
+
+# 3. Only sign existing unsigned packages and repodata:
+make distro-sign
+# Equivalent to: ./scripts/promote_and_sign.sh --sign-only
+
+# Explicit options with the script:
+./scripts/promote_and_sign.sh \
+  --config tacos-distro.toml \
+  --name tacos-stable-x86_64 \
+  --key release@tacos.org.mx \
+  --workers 16 \
+  --sign-workers 12
+```
+
 ### 5. Check Repository Health & Metrics
 ```bash
 # Using tacos.toml:
