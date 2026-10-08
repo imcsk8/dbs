@@ -196,37 +196,10 @@ if [[ "${PROMOTE_ONLY}" == false && "${NO_SIGN}" == false && -n "${GPG_KEY}" ]];
     else
         log_info "Scanning for unsigned RPMs using fast header detection..."
 
-        # Embedded Python scanner to stream null-terminated paths of unsigned RPMs
+        # Scanner using check_rpm_signature.py to stream null-terminated paths of unsigned RPMs
         scan_unsigned_rpms() {
             local search_dir="$1"
-            python3 -c '
-import struct, os, sys
-
-def is_unsigned_rpm(path):
-    try:
-        with open(path, "rb") as f:
-            if f.read(4) != b"\xed\xab\xee\xdb":
-                return False
-            f.seek(96)
-            if f.read(3) != b"\x8e\xad\xe8":
-                return False
-            f.seek(96 + 8)
-            nindex, nbytes = struct.unpack(">II", f.read(8))
-            for _ in range(nindex):
-                tag = struct.unpack(">I", f.read(16)[:4])[0]
-                if tag in (1002, 1005, 268):
-                    return False
-            return True
-    except Exception:
-        return False
-
-target_dir = sys.argv[1]
-if os.path.isdir(target_dir):
-    for entry in os.scandir(target_dir):
-        if entry.is_file() and entry.name.endswith(".rpm"):
-            if is_unsigned_rpm(entry.path):
-                sys.stdout.buffer.write(entry.path.encode("utf-8") + b"\0")
-' "${search_dir}"
+            "${SCRIPT_DIR}/check_rpm_signature.py" -0 --unsigned "${search_dir}"
         }
 
         # 1. Sign Binary RPMs
