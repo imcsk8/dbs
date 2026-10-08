@@ -65,3 +65,14 @@ release: release_dirs
 	make -C rust release
 	install -m 755 rust/bin/dbs bin/dbs
 
+distro-promote:
+	@./scripts/promote_and_sign.sh --promote-only
+
+distro-sign:
+	@./scripts/promote_and_sign.sh --sign-only
+
+distro-publish:
+	@./scripts/promote_and_sign.sh
+
+publish-bulk: distro-publish
+
