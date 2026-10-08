@@ -29,6 +29,7 @@ log_warn()    { echo -e "${YELLOW}${BOLD}[WARNING]${NC} $*"; }
 log_error()   { echo -e "${RED}${BOLD}[ERROR]${NC} $*" >&2; }
 
 # Configuration Defaults
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE=""
 if [[ -f "tacos-distro.toml" ]]; then
     CONFIG_FILE="tacos-distro.toml"
@@ -99,27 +100,7 @@ done
 # 2. Load defaults from [distro] section in TOML config if available
 if [[ -n "${CONFIG_FILE}" && -f "${CONFIG_FILE}" ]]; then
     log_info "Reading defaults from configuration: ${CONFIG_FILE}"
-    eval "$(python3 -c '
-import sys, tomllib
-try:
-    with open(sys.argv[1], "rb") as f:
-        cfg = tomllib.load(f)
-    distro = cfg.get("distro", {})
-    mapping = {
-        "name": "DISTRO_NAME",
-        "arch": "ARCH",
-        "dest": "DISTRO_ROOT",
-        "staging_dir": "STAGING_DIR",
-        "sign_key": "GPG_KEY",
-        "base_url": "BASE_URL",
-        "workers": "WORKERS",
-    }
-    for k, var in mapping.items():
-        if k in distro:
-            print("%s=\"%s\"" % (var, distro[k]))
-except Exception as e:
-    pass
-' "${CONFIG_FILE}")"
+    eval "$("${SCRIPT_DIR}/get_config.py" "${CONFIG_FILE}")"
 fi
 
 # 3. Parse all CLI options to allow overriding configuration file values
