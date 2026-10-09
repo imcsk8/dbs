@@ -4,7 +4,7 @@
 
 [database]
 # PostgreSQL connection string (overrides .env)
-url = "postgres://dbs:prueba123@127.0.0.1:9436/dbs"
+url = "postgres://dbs:mG3A5X034CYPmD4anMsH03P7@127.0.0.1:5432/dbs"
 
 # Automatically record package synchronizations and build metrics in PostgreSQL
 record_db = true
@@ -15,7 +15,7 @@ profile = "tacos-stable-x86_64"
 
 # Additional directories searched for chroot .cfg profiles and templates
 search_paths = [
-    "mock_test",
+    "mock",
 ]
 
 # Default compilation architecture
@@ -35,24 +35,12 @@ dest = "/srv/dbs/tacos/rpm"
 lookaside_dir = "/srv/dbs/lookaside"
 
 # Parallel concurrency for git clone and synchronization
-concurrency = 4
+concurrency = 16
 
-# Base URL of new origin git remote to automatically configure for synced repos
-new_top_origin = "https://codeberg.org/imcsk8/tacos"
-
-# Optional API token / key for authenticating with dist-git forge APIs
-# api_key = ""
-
-# Custom dist-git clone URL template and branch overrides (optional)
-# url_template = "https://src.fedoraproject.org/rpms/{package}.git"
-# branch = "rawhide"
+new_top_origin = "https://git.tacos.org.mx/tacos"
 
 [lookaside]
-# Dist-git lookaside source cache directory
 dir = "/srv/dbs/lookaside"
-
-# Remote lookaside mirrors (queried in priority order before built-in fallbacks)
-# Supports placeholders: {package}, {pkg}, {filename}, {file}, {hash}, {hashtype}
 remotes = [
     "https://repos.tacos.org.mx/sources/{package}/{filename}",
     "https://src.fedoraproject.org/repo/pkgs/{package}/{filename}/{hashtype}/{hash}/{filename}",
@@ -69,6 +57,9 @@ chroot = "tacos-stable-x86_64"
 # Root repository destination directory for published RPMs and repodata
 dest = "/srv/dbs/tacos/distro"
 
+# Skips packages whose version/release is already built.
+skip_existing = true
+
 # Temporary staging directory for worker build logs and artifacts
 staging_dir = "/srv/dbs/tacos/staging"
 
@@ -79,13 +70,13 @@ arch = "x86_64"
 base_url = "http://repos.tacos.org.mx"
 
 # Optional GPG key ID or email to sign RPMs and repomd.xml
-# sign_key = "security@tacos.org.mx"
+sign_key = "release@tacos.org.mx"
 
 # Optional comps XML file defining package groups and environments
 comps = "/srv/dbs/tacos/distro/tacos-stable-x86_64/comps.xml"
 
 # Concurrency for createrepo_c metadata generation
-workers = 4
+workers = 16
 
 # Domain name for generated Nginx virtual hosts
 server_name = "repos.tacos.org.mx"
@@ -96,6 +87,12 @@ server_port = 8080
 
 # Explicit execution order for distribution build stages
 stage_order = ["bootstrap", "system", "utilities", "desktop"]
+
+# Packages that skip %check due to container/hardware constraints in Mock
+nocheck_packages = [
+    "cockpit",      # Requires host hardware sensors (/sys/class/hwmon)
+    "git",          # Requires real TTY and loopback configuration
+]
 
 [distro.stages]
 # Stage 1: Minimal toolchain and core base packages
@@ -138,34 +135,19 @@ system = [
 # Stage 3: Base utilities, networking, and server administration
 utilities = [
     "curl",
-    "git:nocheck",
+    "git",
     "zstd",
     "tar",
     "tmux",
     "vim",
-    "cockpit:nocheck",
+    "cockpit",
 ]
 
 # Stage 4: Graphical stack and desktop environment
 desktop = [
+    "@workstation-product-environment",
     "mesa",
     "wayland",
     "mutter",
     "gnome-shell",
 ]
-
-[build]
-# Skip compiling packages if the exact version/release is already built (override with --force)
-skip_existing = true
-
-# Disable running test suites during package builds (%check phase) globally
-# nocheck = false
-
-# Specific packages that skip %check test suites due to container/hardware constraints in Mock
-nocheck_packages = [
-    "cockpit",
-    "git",
-]
-
-
-

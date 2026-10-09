@@ -305,6 +305,9 @@ pub struct DistroSettings {
     /// Optional GPG key ID or fingerprint for signing RPMs and repomd.xml.
     pub sign_key: Option<String>,
 
+    /// Optional package comps XML metadata file (comps.xml) for package groups and environments.
+    pub comps: Option<PathBuf>,
+
     /// Worker concurrency for createrepo_c metadata generation.
     #[serde(default = "default_workers")]
     pub workers: usize,
@@ -368,6 +371,7 @@ impl Default for DistroSettings {
             arch: default_arch(),
             base_url: default_base_url(),
             sign_key: None,
+            comps: None,
             workers: default_workers(),
             server_name: default_server_name(),
             server_host: default_server_host(),
@@ -650,6 +654,9 @@ base_url = "http://repos.tacos.org.mx"
 
 # Optional GPG key ID or email to sign RPMs and repomd.xml
 # sign_key = "security@tacos.org.mx"
+
+# Optional package groups comps.xml metadata file
+# comps = "/srv/dbs/tacos/distro/tacos-stable-x86_64/comps.xml"
 
 # Concurrency for createrepo_c metadata generation
 workers = 4

@@ -1952,6 +1952,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                     arch: dbs_cfg.distro.arch.clone(),
                     base_url: dbs_cfg.distro.base_url.clone(),
                     sign_key: sign_key.clone(),
+                    comps: dbs_cfg.distro.comps.clone(),
                     workers: concurrency,
                 };
                 let _ = publish_distro(&pub_opts);
@@ -1966,6 +1967,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 arch: dbs_cfg.distro.arch.clone(),
                 base_url: dbs_cfg.distro.base_url.clone(),
                 sign_key,
+                comps: dbs_cfg.distro.comps.clone(),
                 workers: concurrency,
             };
 
@@ -1988,6 +1990,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             arch,
             base_url,
             sign_key,
+            comps,
             workers,
         } => {
             let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
@@ -1996,6 +1999,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let arch = arch.unwrap_or_else(|| dbs_cfg.distro.arch.clone());
             let base_url = base_url.unwrap_or_else(|| dbs_cfg.distro.base_url.clone());
             let sign_key = sign_key.or_else(|| dbs_cfg.distro.sign_key.clone());
+            let comps = comps.or_else(|| dbs_cfg.distro.comps.clone());
             let workers = workers.unwrap_or(dbs_cfg.distro.workers);
 
             println!("===========================================================");
@@ -2005,6 +2009,9 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" Output Directory:    {}/{}", dest.display(), name);
             println!(" Base URL:            {}", base_url);
             println!(" Architecture:        {}", arch);
+            if let Some(ref c) = comps {
+                println!(" Comps File:          {}", c.display());
+            }
             println!("===========================================================");
 
             let opts = DistroPublishOptions {
@@ -2014,6 +2021,7 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 arch,
                 base_url,
                 sign_key,
+                comps,
                 workers,
             };
 

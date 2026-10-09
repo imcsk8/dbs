@@ -43,6 +43,7 @@ STAGING_DIR="/srv/dbs/tacos/staging"
 DISTRO_ROOT="/srv/dbs/tacos/distro"
 GPG_KEY="release@tacos.org.mx"
 BASE_URL="http://repos.tacos.org.mx"
+COMPS_FILE=""
 WORKERS=$(nproc 2>/dev/null || echo 8)
 SIGN_WORKERS=12
 
@@ -64,6 +65,7 @@ Options:
   -a, --arch <ARCH>           Target architecture [default: ${ARCH}]
   -s, --staging-dir <PATH>    Staging root directory [default: ${STAGING_DIR}]
   -d, --distro-dir <PATH>     Distro repository root [default: ${DISTRO_ROOT}]
+  -g, --comps <PATH>          Path to comps.xml package groups file [optional]
   -k, --key <KEY_ID>          GPG key ID/email for signing [default: ${GPG_KEY}]
   -u, --base-url <URL>        Base URL for client .repo [default: ${BASE_URL}]
   -j, --workers <NUM>         Concurrency for createrepo_c [default: ${WORKERS}]
@@ -111,6 +113,7 @@ while [[ $# -gt 0 ]]; do
         -a|--arch) ARCH="$2"; shift 2 ;;
         -s|--staging-dir) STAGING_DIR="$2"; shift 2 ;;
         -d|--distro-dir) DISTRO_ROOT="$2"; shift 2 ;;
+        -g|--comps) COMPS_FILE="$2"; shift 2 ;;
         -k|--key) GPG_KEY="$2"; shift 2 ;;
         -u|--base-url) BASE_URL="$2"; shift 2 ;;
         -j|--workers) WORKERS="$2"; shift 2 ;;
@@ -129,6 +132,21 @@ BINARY_REPO="${TARGET_DISTRO_DIR}/${ARCH}"
 SOURCE_REPO="${TARGET_DISTRO_DIR}/source/SRPMS"
 STAGING_POOL="${STAGING_DIR}/rpms/${ARCH}"
 
+# Auto-detect comps.xml if not explicitly configured or passed via CLI
+if [[ -z "${COMPS_FILE}" ]]; then
+    if [[ -f "${TARGET_DISTRO_DIR}/comps.xml" ]]; then
+        COMPS_FILE="${TARGET_DISTRO_DIR}/comps.xml"
+    elif [[ -f "${DISTRO_ROOT}/${DISTRO_NAME}/comps.xml" ]]; then
+        COMPS_FILE="${DISTRO_ROOT}/${DISTRO_NAME}/comps.xml"
+    elif [[ -f "${SCRIPT_DIR}/../config/comps.xml" ]]; then
+        COMPS_FILE="${SCRIPT_DIR}/../config/comps.xml"
+    elif [[ -f "config/comps.xml" ]]; then
+        COMPS_FILE="config/comps.xml"
+    elif [[ -f "/srv/dbs/tacos/distro/tacos-stable-x86_64/comps.xml" ]]; then
+        COMPS_FILE="/srv/dbs/tacos/distro/tacos-stable-x86_64/comps.xml"
+    fi
+fi
+
 echo "==========================================================="
 echo " TacOS Bulk Package Promotion & Signing Recipe"
 echo " Distribution:      ${DISTRO_NAME}"
@@ -137,6 +155,7 @@ echo " Staging Root:      ${STAGING_DIR}"
 echo " Dynamic Pool:      ${STAGING_POOL}"
 echo " Binary Repo:       ${BINARY_REPO}"
 echo " Source Repo:       ${SOURCE_REPO}"
+echo " Comps Metadata:    ${COMPS_FILE:-None (no package groups)}"
 echo " GPG Signing Key:   ${GPG_KEY}"
 echo " Indexing Workers:  ${WORKERS} threads"
 echo " Signing Workers:   ${SIGN_WORKERS} workers"
@@ -242,8 +261,16 @@ fi
 if [[ "${PROMOTE_ONLY}" == false ]]; then
     log_step "Phase 3: Indexing Repository Metadata"
 
+    CREATEREPO_COMPS_ARGS=()
+    if [[ -n "${COMPS_FILE}" && -f "${COMPS_FILE}" ]]; then
+        log_info "Including package groups from comps file: ${COMPS_FILE}"
+        CREATEREPO_COMPS_ARGS=(-g "${COMPS_FILE}")
+    elif [[ -n "${COMPS_FILE}" ]]; then
+        log_warn "Comps file specified but not found: ${COMPS_FILE} (skipping groups)"
+    fi
+
     log_info "Updating binary repository metadata with ${WORKERS} workers..."
-    createrepo_c --update --workers "${WORKERS}" "${BINARY_REPO}"
+    createrepo_c --update --workers "${WORKERS}" ${CREATEREPO_COMPS_ARGS[@]+"${CREATEREPO_COMPS_ARGS[@]}"} "${BINARY_REPO}"
 
     if [[ "${SKIP_SRPMS}" == false && -d "${SOURCE_REPO}" ]]; then
         if compgen -G "${SOURCE_REPO}/*.src.rpm" > /dev/null; then

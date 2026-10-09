@@ -43,6 +43,8 @@ pub struct DistroPublishOptions {
     pub base_url: String,
     /// Optional GPG key identifier or email for RPM and metadata signing.
     pub sign_key: Option<String>,
+    /// Optional path to package groups metadata XML file (`comps.xml`).
+    pub comps: Option<PathBuf>,
     /// Number of concurrent worker threads for `createrepo_c`.
     pub workers: usize,
 }
@@ -222,6 +224,27 @@ pub fn publish_distro(opts: &DistroPublishOptions) -> Result<DistroPublishReport
     let mut cmd_bin = Command::new("createrepo_c");
     cmd_bin.arg("--update");
     cmd_bin.arg(format!("--workers={}", opts.workers));
+
+    // Resolve comps.xml path: explicit option or auto-detection fallback
+    let comps_file = opts.comps.clone().or_else(|| {
+        let candidates = [
+            distro_dir.join("comps.xml"),
+            opts.dest_root.join("comps.xml"),
+            PathBuf::from("config/comps.xml"),
+            PathBuf::from("/srv/dbs/tacos/distro/tacos-stable-x86_64/comps.xml"),
+        ];
+        candidates.into_iter().find(|p| p.is_file())
+    });
+
+    if let Some(ref comps) = comps_file {
+        if comps.is_file() {
+            println!("Including package groups comps metadata from {}...", comps.display());
+            cmd_bin.arg("-g").arg(comps);
+        } else {
+            eprintln!("Warning: configured comps file not found: {}", comps.display());
+        }
+    }
+
     cmd_bin.arg(&binary_repo);
     let status_bin = match cmd_bin.status() {
         Ok(st) => st,

@@ -754,6 +754,10 @@ pub enum DistroCommands {
         #[arg(long)]
         sign_key: Option<String>,
 
+        /// Optional path to package groups comps XML file (defaults to [distro].comps in dbs.toml).
+        #[arg(short = 'g', long)]
+        comps: Option<PathBuf>,
+
         /// Number of parallel workers for createrepo_c (defaults to [distro].workers in dbs.toml).
         #[arg(short = 'j', long)]
         workers: Option<usize>,

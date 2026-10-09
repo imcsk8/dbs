@@ -28,6 +28,7 @@ DISTRO_KEY_MAPPING = {
     "sign_key": "GPG_KEY",
     "base_url": "BASE_URL",
     "workers": "WORKERS",
+    "comps": "COMPS_FILE",
 }
 
 
