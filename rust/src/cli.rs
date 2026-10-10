@@ -364,6 +364,18 @@ pub struct BuildArgs {
     /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
     #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
     pub nocheck_packages: Vec<String>,
+
+    /// Enable configure/build conditional option (--with <option>).
+    #[arg(long = "with", action = clap::ArgAction::Append)]
+    pub with_bconds: Vec<String>,
+
+    /// Disable configure/build conditional option (--without <option>).
+    #[arg(long = "without", action = clap::ArgAction::Append)]
+    pub without_bconds: Vec<String>,
+
+    /// Define an RPM macro for the build (-D 'MACRO EXPR' or --define 'MACRO EXPR').
+    #[arg(short = 'D', long = "define", action = clap::ArgAction::Append)]
+    pub defines: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -953,6 +965,18 @@ pub struct RetryArgs {
     /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
     #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
     pub nocheck_packages: Vec<String>,
+
+    /// Enable configure/build conditional option (--with <option>).
+    #[arg(long = "with", action = clap::ArgAction::Append)]
+    pub with_bconds: Vec<String>,
+
+    /// Disable configure/build conditional option (--without <option>).
+    #[arg(long = "without", action = clap::ArgAction::Append)]
+    pub without_bconds: Vec<String>,
+
+    /// Define an RPM macro for the build (-D 'MACRO EXPR' or --define 'MACRO EXPR').
+    #[arg(short = 'D', long = "define", action = clap::ArgAction::Append)]
+    pub defines: Vec<String>,
 }
 
 /// Arguments for the `clean` subcommand.
@@ -1194,6 +1218,42 @@ mod tests {
                 _ => panic!("Expected DistgitCommands::Pull"),
             },
             _ => panic!("Expected Commands::Distgit"),
+        }
+    }
+
+    #[test]
+    fn test_cli_build_with_without_define_flags() {
+        let cli = Cli::try_parse_from([
+            "dbs", "build", "--with", "bootstrap", "--without", "tests",
+            "-D", "_smp_mflags -j24", "--define", "__default_python3_pkgversion 3.15",
+            "package.spec",
+        ]).unwrap();
+        match cli.command {
+            Commands::Build(args) => {
+                assert_eq!(args.with_bconds, vec!["bootstrap"]);
+                assert_eq!(args.without_bconds, vec!["tests"]);
+                assert_eq!(
+                    args.defines,
+                    vec!["_smp_mflags -j24", "__default_python3_pkgversion 3.15"]
+                );
+            }
+            _ => panic!("Expected Commands::Build"),
+        }
+    }
+
+    #[test]
+    fn test_cli_retry_with_without_define_flags() {
+        let cli = Cli::try_parse_from([
+            "dbs", "retry", "--with", "bootstrap", "--without", "tests",
+            "-D", "vendor tacos", "python3.15",
+        ]).unwrap();
+        match cli.command {
+            Commands::Retry(args) => {
+                assert_eq!(args.with_bconds, vec!["bootstrap"]);
+                assert_eq!(args.without_bconds, vec!["tests"]);
+                assert_eq!(args.defines, vec!["vendor tacos"]);
+            }
+            _ => panic!("Expected Commands::Retry"),
         }
     }
 }

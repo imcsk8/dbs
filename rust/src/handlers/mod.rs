@@ -653,6 +653,10 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
                 }
             }
             runner = runner.with_nocheck_packages(effective_nocheck_pkgs.clone());
+            runner = runner
+                .with_bconds(args.with_bconds.clone())
+                .without_bconds(args.without_bconds.clone())
+                .with_defines(args.defines.clone());
 
             let distro_repo = dbs_cfg.distro.dest.join(&dbs_cfg.distro.name).join(&dbs_cfg.distro.arch);
             if distro_repo.is_dir() {
@@ -742,7 +746,10 @@ pub async fn handle_build(mut args: BuildArgs, dbs_cfg: &DbsConfig) -> Result<()
             }
             let runner = RpmbuildRunner::default()
                 .with_nocheck(nocheck)
-                .with_nocheck_packages(effective_nocheck_pkgs.clone());
+                .with_nocheck_packages(effective_nocheck_pkgs.clone())
+                .with_bconds(args.with_bconds.clone())
+                .without_bconds(args.without_bconds.clone())
+                .with_defines(args.defines.clone());
             if runner.nocheck {
                 println!(" Test Execution:  disabled (--nocheck)");
             } else if !effective_nocheck_pkgs.is_empty() {
@@ -2486,6 +2493,9 @@ pub async fn handle_retry(args: RetryArgs, dbs_cfg: &DbsConfig) -> Result<()> {
         force: true,
         nocheck: args.nocheck,
         nocheck_packages: args.nocheck_packages,
+        with_bconds: args.with_bconds,
+        without_bconds: args.without_bconds,
+        defines: args.defines,
     };
 
     handle_build(build_args, dbs_cfg).await
@@ -3097,6 +3107,9 @@ mod tests {
             lookaside_dir: None,
             nocheck: false,
             nocheck_packages: Vec::new(),
+            with_bconds: Vec::new(),
+            without_bconds: Vec::new(),
+            defines: Vec::new(),
         };
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());
@@ -3119,6 +3132,9 @@ mod tests {
             lookaside_dir: None,
             nocheck: false,
             nocheck_packages: Vec::new(),
+            with_bconds: Vec::new(),
+            without_bconds: Vec::new(),
+            defines: Vec::new(),
         };
         let res = handle_retry(args, &dbs_cfg).await;
         assert!(res.is_err());

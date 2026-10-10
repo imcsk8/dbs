@@ -171,6 +171,12 @@ pub struct MockRunner {
     pub nocheck: bool,
     /// Specific package names configured to skip %check test execution.
     pub nocheck_packages: Vec<String>,
+    /// Conditional build options to enable (`--with <option>`).
+    pub with_bconds: Vec<String>,
+    /// Conditional build options to disable (`--without <option>`).
+    pub without_bconds: Vec<String>,
+    /// RPM macros to define (`-D 'MACRO EXPR'`).
+    pub defines: Vec<String>,
 }
 
 impl MockRunner {
@@ -186,6 +192,9 @@ impl MockRunner {
             smp_cpus: None,
             nocheck: false,
             nocheck_packages: Vec::new(),
+            with_bconds: Vec::new(),
+            without_bconds: Vec::new(),
+            defines: Vec::new(),
         }
     }
 
@@ -266,6 +275,36 @@ impl MockRunner {
         })
     }
 
+    /// Configures conditional build options to enable (--with <option>).
+    pub fn with_bconds<I, S>(mut self, bconds: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.with_bconds = bconds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Configures conditional build options to disable (--without <option>).
+    pub fn without_bconds<I, S>(mut self, bconds: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.without_bconds = bconds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Configures RPM macros to define (-D 'MACRO EXPR').
+    pub fn with_defines<I, S>(mut self, defines: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.defines = defines.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Builds a single package with worker isolation, automatic source acquisition, and two-stage Mock compilation.
     pub fn build_with_worker(
         &self,
@@ -318,6 +357,16 @@ impl MockRunner {
                 srpm_cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
                 srpm_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
                 srpm_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
+            }
+
+            for with_opt in &self.with_bconds {
+                srpm_cmd.arg(format!("--with={}", with_opt));
+            }
+            for without_opt in &self.without_bconds {
+                srpm_cmd.arg(format!("--without={}", without_opt));
+            }
+            for def in &self.defines {
+                srpm_cmd.arg("-D").arg(def);
             }
 
             srpm_cmd.arg("--buildsrpm");
@@ -414,6 +463,16 @@ impl MockRunner {
             rebuild_cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
             rebuild_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
             rebuild_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
+        }
+
+        for with_opt in &self.with_bconds {
+            rebuild_cmd.arg(format!("--with={}", with_opt));
+        }
+        for without_opt in &self.without_bconds {
+            rebuild_cmd.arg(format!("--without={}", without_opt));
+        }
+        for def in &self.defines {
+            rebuild_cmd.arg("-D").arg(def);
         }
 
         let should_skip_check = self.nocheck || self.is_nocheck_package(pkg_stem);
@@ -528,6 +587,15 @@ impl MockRunner {
                     srpm_cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
                     srpm_cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
                 }
+                for with_opt in &self.with_bconds {
+                    srpm_cmd.arg(format!("--with={}", with_opt));
+                }
+                for without_opt in &self.without_bconds {
+                    srpm_cmd.arg(format!("--without={}", without_opt));
+                }
+                for def in &self.defines {
+                    srpm_cmd.arg("-D").arg(def);
+                }
                 srpm_cmd.arg("--buildsrpm");
                 srpm_cmd.arg("--spec").arg(target);
                 srpm_cmd.arg(format!("--sources={}", sources_dir.display()));
@@ -562,6 +630,16 @@ impl MockRunner {
             cmd.arg("-D").arg(format!("_smp_mflags -j{}", smp));
             cmd.arg("-D").arg(format!("_smp_build_ncpus {}", smp));
             cmd.arg("-D").arg(format!("_smp_ncpus_max {}", smp));
+        }
+
+        for with_opt in &self.with_bconds {
+            cmd.arg(format!("--with={}", with_opt));
+        }
+        for without_opt in &self.without_bconds {
+            cmd.arg(format!("--without={}", without_opt));
+        }
+        for def in &self.defines {
+            cmd.arg("-D").arg(def);
         }
 
         let any_nocheck = self.nocheck || targets.iter().any(|t| {
@@ -731,6 +809,12 @@ pub struct RpmbuildRunner {
     pub nocheck: bool,
     /// Specific package names configured to skip %check test execution.
     pub nocheck_packages: Vec<String>,
+    /// Conditional build options to enable (`--with <option>`).
+    pub with_bconds: Vec<String>,
+    /// Conditional build options to disable (`--without <option>`).
+    pub without_bconds: Vec<String>,
+    /// RPM macros to define (`-D 'MACRO EXPR'`).
+    pub defines: Vec<String>,
 }
 
 impl RpmbuildRunner {
@@ -747,6 +831,36 @@ impl RpmbuildRunner {
         S: Into<String>,
     {
         self.nocheck_packages = packages.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Configures conditional build options to enable (--with <option>).
+    pub fn with_bconds<I, S>(mut self, bconds: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.with_bconds = bconds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Configures conditional build options to disable (--without <option>).
+    pub fn without_bconds<I, S>(mut self, bconds: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.without_bconds = bconds.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Configures RPM macros to define (-D 'MACRO EXPR').
+    pub fn with_defines<I, S>(mut self, defines: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.defines = defines.into_iter().map(Into::into).collect();
         self
     }
 
@@ -780,6 +894,15 @@ impl BuildRunner for RpmbuildRunner {
         cmd.arg("-ba");
         if self.nocheck || self.is_nocheck_package(pkg_stem) {
             cmd.arg("--nocheck");
+        }
+        for with_opt in &self.with_bconds {
+            cmd.arg(format!("--with={}", with_opt));
+        }
+        for without_opt in &self.without_bconds {
+            cmd.arg(format!("--without={}", without_opt));
+        }
+        for def in &self.defines {
+            cmd.arg("-D").arg(def);
         }
         cmd.arg(format!("--define=_topdir {}", result_dir.display()));
         cmd.arg(input_path);
@@ -1914,6 +2037,30 @@ Error: Problem: package cannot be installed
 
         let runner_added = runner.add_nocheck_package("gnome-shell");
         assert!(runner_added.is_nocheck_package("gnome-shell"));
+    }
+
+    #[test]
+    fn test_runner_bconds_and_defines_builders() {
+        let runner = MockRunner::new("test-profile")
+            .with_bconds(vec!["bootstrap"])
+            .without_bconds(vec!["tests"])
+            .with_defines(vec!["_smp_mflags -j24", "__default_python3_pkgversion 3.15"]);
+
+        assert_eq!(runner.with_bconds, vec!["bootstrap"]);
+        assert_eq!(runner.without_bconds, vec!["tests"]);
+        assert_eq!(
+            runner.defines,
+            vec!["_smp_mflags -j24", "__default_python3_pkgversion 3.15"]
+        );
+
+        let rpm_runner = RpmbuildRunner::default()
+            .with_bconds(vec!["bootstrap"])
+            .without_bconds(vec!["tests"])
+            .with_defines(vec!["vendor tacos"]);
+
+        assert_eq!(rpm_runner.with_bconds, vec!["bootstrap"]);
+        assert_eq!(rpm_runner.without_bconds, vec!["tests"]);
+        assert_eq!(rpm_runner.defines, vec!["vendor tacos"]);
     }
 }
 
