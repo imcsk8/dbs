@@ -13,10 +13,12 @@ use diesel::prelude::*;
 use eyre::{eyre, Result};
 
 use crate::models::{
-    NewOperatingSystem, NewPackage, NewPackageArtifact, NewPackageProvides, NewPackageRequires,
-    OperatingSystem, Package, PackageArtifact,
+    ClusterWorker, NewOperatingSystem, NewPackage, NewPackageArtifact,
+    NewPackageProvides, NewPackageRequires, OperatingSystem, Package, PackageArtifact,
 };
-use crate::schema::{operating_system, package, package_artifact, package_provides, package_requires};
+use crate::schema::{
+    cluster_worker, operating_system, package, package_artifact, package_provides, package_requires,
+};
 use crate::types::BuildStatus;
 
 /// Resolves `DATABASE_URL` from the environment or by reading config/env files.
@@ -726,5 +728,171 @@ pub fn get_build_counts(conn: &mut PgConnection) -> Result<BuildCounts> {
         }
     }
     Ok(counts)
+}
+
+/// Atomically claims the next available `PENDING` package from the build queue using
+/// `FOR UPDATE SKIP LOCKED`, assigning it to the specified `worker_id` and transitioning
+/// its status to `BUILDING`.
+pub fn claim_next_pending_package(
+    conn: &mut PgConnection,
+    worker_id: i32,
+    allowed_names: Option<&[String]>,
+) -> Result<Option<Package>> {
+    match allowed_names {
+        Some(names) if !names.is_empty() => {
+            let names_vec: Vec<String> = names.to_vec();
+            let query = diesel::sql_query(
+                "WITH next_pkg AS (
+                    SELECT id FROM package
+                    WHERE build_status = 'PENDING'
+                      AND name = ANY($2)
+                    ORDER BY id ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE package
+                SET build_status = 'BUILDING',
+                    worker_id = $1
+                FROM next_pkg
+                WHERE package.id = next_pkg.id
+                RETURNING package.*"
+            )
+            .bind::<diesel::sql_types::Int4, _>(worker_id)
+            .bind::<diesel::sql_types::Array<diesel::sql_types::Text>, _>(names_vec);
+
+            match query.get_result::<Package>(conn).optional() {
+                Ok(pkg) => Ok(pkg),
+                Err(e) => Err(eyre!("Failed to claim next pending package for worker {}: {}", worker_id, e)),
+            }
+        }
+        _ => {
+            let query = diesel::sql_query(
+                "WITH next_pkg AS (
+                    SELECT id FROM package
+                    WHERE build_status = 'PENDING'
+                    ORDER BY id ASC
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT 1
+                )
+                UPDATE package
+                SET build_status = 'BUILDING',
+                    worker_id = $1
+                FROM next_pkg
+                WHERE package.id = next_pkg.id
+                RETURNING package.*"
+            )
+            .bind::<diesel::sql_types::Int4, _>(worker_id);
+
+            match query.get_result::<Package>(conn).optional() {
+                Ok(pkg) => Ok(pkg),
+                Err(e) => Err(eyre!("Failed to claim next pending package for worker {}: {}", worker_id, e)),
+            }
+        }
+    }
+}
+
+/// Registers or updates a cluster worker in the `cluster_worker` telemetry catalog.
+pub fn register_cluster_worker(
+    conn: &mut PgConnection,
+    worker_id: i32,
+    node_name: &str,
+    concurrency: i32,
+) -> Result<()> {
+    let _ = diesel::sql_query(
+        "CREATE TABLE IF NOT EXISTS cluster_worker (
+            id SERIAL PRIMARY KEY,
+            worker_id INT NOT NULL UNIQUE,
+            node_name TEXT NOT NULL,
+            concurrency INT NOT NULL DEFAULT 1,
+            current_package_id INT REFERENCES package(id) ON DELETE SET NULL,
+            last_heartbeat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'IDLE'
+        )"
+    ).execute(conn);
+
+    match diesel::sql_query(
+        "INSERT INTO cluster_worker (worker_id, node_name, concurrency, last_heartbeat, status)
+         VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 'IDLE')
+         ON CONFLICT (worker_id) DO UPDATE
+         SET node_name = EXCLUDED.node_name,
+             concurrency = EXCLUDED.concurrency,
+             last_heartbeat = CURRENT_TIMESTAMP,
+             status = 'IDLE'"
+    )
+    .bind::<diesel::sql_types::Int4, _>(worker_id)
+    .bind::<diesel::sql_types::Text, _>(node_name)
+    .bind::<diesel::sql_types::Int4, _>(concurrency)
+    .execute(conn)
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(eyre!("Failed to register cluster worker {}: {}", worker_id, e)),
+    }
+}
+
+/// Updates the heartbeat and current package attribution for an active cluster worker.
+pub fn update_worker_heartbeat(
+    conn: &mut PgConnection,
+    worker_id: i32,
+    current_pkg_id: Option<i32>,
+) -> Result<()> {
+    let status_str = if current_pkg_id.is_some() { "BUILDING" } else { "IDLE" };
+    match diesel::sql_query(
+        "UPDATE cluster_worker
+         SET current_package_id = $2,
+             last_heartbeat = CURRENT_TIMESTAMP,
+             status = $3
+         WHERE worker_id = $1"
+    )
+    .bind::<diesel::sql_types::Int4, _>(worker_id)
+    .bind::<diesel::sql_types::Nullable<diesel::sql_types::Int4>, _>(current_pkg_id)
+    .bind::<diesel::sql_types::Text, _>(status_str)
+    .execute(conn)
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(eyre!("Failed to update heartbeat for worker {}: {}", worker_id, e)),
+    }
+}
+
+/// Unregisters a cluster worker node upon graceful shutdown.
+pub fn unregister_cluster_worker(conn: &mut PgConnection, worker_id: i32) -> Result<()> {
+    match diesel::sql_query("DELETE FROM cluster_worker WHERE worker_id = $1")
+        .bind::<diesel::sql_types::Int4, _>(worker_id)
+        .execute(conn)
+    {
+        Ok(_) => Ok(()),
+        Err(e) => Err(eyre!("Failed to unregister cluster worker {}: {}", worker_id, e)),
+    }
+}
+
+/// Reclaims packages stranded in `BUILDING` state whose worker heartbeat has expired.
+pub fn reclaim_stale_builds(conn: &mut PgConnection, timeout_seconds: u64) -> Result<usize> {
+    let sql = format!(
+        "UPDATE package
+         SET build_status = 'PENDING',
+             worker_id = NULL,
+             error_summary = 'Reclaimed: worker heartbeat expired'
+         WHERE build_status = 'BUILDING'
+           AND worker_id IN (
+               SELECT worker_id FROM cluster_worker
+               WHERE last_heartbeat < CURRENT_TIMESTAMP - INTERVAL '{} seconds'
+           )",
+        timeout_seconds
+    );
+
+    match diesel::sql_query(sql).execute(conn) {
+        Ok(count) => Ok(count),
+        Err(e) => Err(eyre!("Failed to reclaim stale package builds: {}", e)),
+    }
+}
+
+/// Lists all currently registered cluster worker nodes from the database.
+pub fn list_cluster_workers(conn: &mut PgConnection) -> Result<Vec<ClusterWorker>> {
+    match cluster_worker::table
+        .order(cluster_worker::worker_id.asc())
+        .load::<ClusterWorker>(conn)
+    {
+        Ok(workers) => Ok(workers),
+        Err(e) => Err(eyre!("Failed to list cluster workers: {}", e)),
+    }
 }
 

@@ -230,3 +230,26 @@ pub struct NewPackageArtifact {
     pub file_size_bytes: i64,
 }
 
+#[derive(Clone, Debug, Identifiable, Queryable, QueryableByName, Selectable, Insertable, Serialize, Deserialize, AsChangeset)]
+#[diesel(table_name = cluster_worker)]
+pub struct ClusterWorker {
+    pub id: i32,
+    pub worker_id: i32,
+    pub node_name: String,
+    pub concurrency: i32,
+    pub current_package_id: Option<i32>,
+    pub last_heartbeat: Option<DateTime<Utc>>,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, Insertable, Serialize, Deserialize)]
+#[diesel(table_name = cluster_worker)]
+pub struct NewClusterWorker {
+    pub worker_id: i32,
+    pub node_name: String,
+    pub concurrency: i32,
+    pub current_package_id: Option<i32>,
+    pub last_heartbeat: Option<DateTime<Utc>>,
+    pub status: String,
+}
+

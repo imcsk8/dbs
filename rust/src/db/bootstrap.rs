@@ -4,6 +4,8 @@
 //! enabling zero-dependency database provisioning without requiring external SQL files,
 //! `psql`, or Makefiles.
 
+#![allow(clippy::redundant_field_names)]
+
 use diesel::connection::SimpleConnection;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;

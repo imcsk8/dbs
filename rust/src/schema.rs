@@ -155,6 +155,20 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    use diesel::sql_types::*;
+
+    cluster_worker (id) {
+        id -> Int4,
+        worker_id -> Int4,
+        node_name -> Text,
+        concurrency -> Int4,
+        current_package_id -> Nullable<Int4>,
+        last_heartbeat -> Nullable<Timestamptz>,
+        status -> Text,
+    }
+}
+
 diesel::joinable!(operating_system -> architecture (architecture));
 diesel::joinable!(operating_system -> package_manager (manager));
 diesel::joinable!(operating_system_package -> operating_system (id_os));
@@ -164,6 +178,7 @@ diesel::joinable!(package_provides -> package (id_package));
 diesel::joinable!(package_requires -> package (id_package));
 diesel::joinable!(package_artifact -> package (id_package));
 diesel::joinable!(product -> operating_system (id_os));
+diesel::joinable!(cluster_worker -> package (current_package_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     architecture,
@@ -176,4 +191,5 @@ diesel::allow_tables_to_appear_in_same_query!(
     package_artifact,
     package_manager,
     product,
+    cluster_worker,
 );

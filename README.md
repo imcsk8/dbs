@@ -264,9 +264,10 @@ make distro-publish
 
 ---
 
-## Hands-On Tutorial
+## Hands-On Tutorials
 
-For a complete step-by-step walkthrough detailing how to create, re-remote, resolve dependencies, and compile packages for a distribution, see [TUTORIAL.md](TUTORIAL.md).
+* For a complete step-by-step walkthrough detailing how to create, re-remote, resolve dependencies, and compile packages for a distribution on a single host, see [TUTORIAL.md](TUTORIAL.md).
+* For scaling compilation across a cluster using an orchestrator (`sohoai`) and distributed workers (`dbs worker`), see [TUTORIAL_DISTRIBUTED.md](TUTORIAL_DISTRIBUTED.md).
 
 ---
 

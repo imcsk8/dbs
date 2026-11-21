@@ -35,6 +35,9 @@ pub struct DbsConfig {
 
     #[serde(default)]
     pub build: BuildConfig,
+
+    #[serde(default)]
+    pub cluster: ClusterConfig,
 }
 
 
@@ -64,6 +67,61 @@ impl Default for BuildConfig {
             skip_existing: default_skip_existing(),
             nocheck: false,
             nocheck_packages: Vec::new(),
+        }
+    }
+}
+
+/// Settings for distributed compilation cluster and worker nodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterConfig {
+    /// Enable distributed build orchestration across cluster nodes.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// HTTP port for embedded coordinator service.
+    #[serde(default = "default_coordinator_port")]
+    pub coordinator_port: u16,
+
+    /// Bind host address for embedded coordinator service.
+    #[serde(default = "default_coordinator_host")]
+    pub coordinator_host: String,
+
+    /// Public/LAN URL of the coordinator advertised to workers (e.g. http://192.168.1.100:8080).
+    pub coordinator_url: Option<String>,
+
+    /// Number of local workers running on the coordinator host itself.
+    #[serde(default = "default_local_workers")]
+    pub local_workers: usize,
+
+    /// Unique numeric worker ID for telemetry attribution on worker nodes.
+    pub worker_id: Option<i32>,
+
+    /// Default concurrency slots on worker nodes.
+    #[serde(default = "default_worker_concurrency")]
+    pub concurrency: usize,
+
+    /// Heartbeat interval in seconds for cluster workers.
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval: u64,
+}
+
+fn default_coordinator_port() -> u16 { 8080 }
+fn default_coordinator_host() -> String { "0.0.0.0".to_string() }
+fn default_local_workers() -> usize { 4 }
+fn default_worker_concurrency() -> usize { 4 }
+fn default_heartbeat_interval() -> u64 { 10 }
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            coordinator_port: default_coordinator_port(),
+            coordinator_host: default_coordinator_host(),
+            coordinator_url: None,
+            local_workers: default_local_workers(),
+            worker_id: None,
+            concurrency: default_worker_concurrency(),
+            heartbeat_interval: default_heartbeat_interval(),
         }
     }
 }

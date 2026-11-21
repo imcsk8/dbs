@@ -92,6 +92,10 @@ pub enum Commands {
 
     /// Inspect, list, and resolve RPM comps groups and environments (e.g. @workstation-product-environment, @core).
     Comps(CompsArgs),
+
+    /// Run a distributed build worker node consuming compilation jobs from PostgreSQL queue.
+    #[command(alias = "agent")]
+    Worker(WorkerArgs),
 }
 
 /// Arguments for the `monitor` / `top` subcommand.
@@ -102,12 +106,72 @@ pub struct MonitorArgs {
     pub distro: Option<String>,
 }
 
+/// Arguments for the `worker` subcommand.
+#[derive(Args, Debug, Clone)]
+pub struct WorkerArgs {
+    /// PostgreSQL connection URL (e.g. postgres://dbs:pass@sohoai:5432/dbs).
+    #[arg(long, env = "DATABASE_URL")]
+    pub db: Option<String>,
+
+    /// Coordinator HTTP base URL (e.g. http://sohoai:8080).
+    #[arg(long, env = "DBS_COORDINATOR_URL", default_value = "http://127.0.0.1:8080")]
+    pub coordinator_url: String,
+
+    /// Target Mock chroot profile name (defaults to [chroot].profile in config).
+    #[arg(short = 'r', long = "root")]
+    pub root: Option<String>,
+
+    /// Directory containing Mock .cfg profile files.
+    #[arg(long = "configdir")]
+    pub config_dir: Option<PathBuf>,
+
+    /// Unique numeric worker ID for telemetry attribution.
+    #[arg(long)]
+    pub worker_id: Option<i32>,
+
+    /// Human-readable node name (defaults to system hostname).
+    #[arg(long)]
+    pub node_name: Option<String>,
+
+    /// Number of concurrent package compilation slots on this worker.
+    #[arg(short = 'j', long = "concurrency", default_value_t = 4)]
+    pub concurrency: usize,
+
+    /// Number of SMP compilation threads passed to Mock inside the chroot.
+    #[arg(long = "smp")]
+    pub smp: Option<usize>,
+
+    /// Local scratch / working directory for downloaded SRPMs and build artifacts.
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+
+    /// Heartbeat interval in seconds (default: 10).
+    #[arg(long, default_value_t = 10)]
+    pub heartbeat_interval: u64,
+
+    /// Poll interval in seconds when no pending jobs are available (default: 3).
+    #[arg(long, default_value_t = 3)]
+    pub poll_interval: u64,
+
+    /// Keep temporary worker build files instead of deleting after upload.
+    #[arg(long)]
+    pub keep_build_dir: bool,
+
+    /// Disable running test suites in Mock (%check phase).
+    #[arg(long)]
+    pub nocheck: bool,
+
+    /// Specific package names to skip test suites for (can be specified multiple times or comma-separated).
+    #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
+    pub nocheck_packages: Vec<String>,
+}
+
 /// Arguments for the `explore` subcommand.
 #[derive(Args, Debug, Clone)]
 pub struct ExploreArgs {
-    /// Distribution name or preset to search (e.g. fedora-rawhide, centos-stream-10, centos-stream-9, tacos).
-    #[arg(short, long, default_value = "fedora-rawhide")]
-    pub distro: String,
+    /// Distribution name or preset to search (defaults to [distgit].distro in dbs.toml).
+    #[arg(short, long)]
+    pub distro: Option<String>,
 
     /// Search pattern or package name query.
     #[arg(short, long)]
@@ -737,6 +801,22 @@ pub enum DistroCommands {
         #[arg(long = "nocheck-pkg", visible_alias = "nocheck-packages", value_delimiter = ',')]
         nocheck_packages: Vec<String>,
 
+        /// Enable distributed compilation orchestration across cluster worker nodes via PostgreSQL queue.
+        #[arg(long)]
+        distributed: bool,
+
+        /// Port for the embedded HTTP coordinator service (serves staging and receives artifacts).
+        #[arg(long)]
+        coordinator_port: Option<u16>,
+
+        /// Public/LAN URL of this coordinator advertised to worker nodes (e.g. http://192.168.1.100:8080).
+        #[arg(long)]
+        coordinator_url: Option<String>,
+
+        /// Number of local workers running on this coordinator host (0 to only use remote workers).
+        #[arg(long)]
+        local_workers: Option<usize>,
+
         /// Target package specifications, names, or comps groups/environments to build (e.g. @core, @workstation-product-environment, bash).
         targets: Vec<String>,
     },
@@ -1254,6 +1334,86 @@ mod tests {
                 assert_eq!(args.defines, vec!["vendor tacos"]);
             }
             _ => panic!("Expected Commands::Retry"),
+        }
+    }
+
+    #[test]
+    fn test_cli_worker_subcommand() {
+        let cli = Cli::try_parse_from([
+            "dbs", "worker",
+            "--coordinator-url", "http://sohoai:8080",
+            "-j", "8",
+            "--worker-id", "101",
+            "--smp", "16",
+            "--root", "tacos-stable-x86_64",
+            "--nocheck",
+        ]).unwrap();
+
+        match cli.command {
+            Commands::Worker(args) => {
+                assert_eq!(args.coordinator_url, "http://sohoai:8080");
+                assert_eq!(args.concurrency, 8);
+                assert_eq!(args.worker_id, Some(101));
+                assert_eq!(args.smp, Some(16));
+                assert_eq!(args.root.as_deref(), Some("tacos-stable-x86_64"));
+                assert!(args.nocheck);
+            }
+            _ => panic!("Expected Commands::Worker"),
+        }
+    }
+
+    #[test]
+    fn test_cli_distro_build_distributed_flags() {
+        let cli = Cli::try_parse_from([
+            "dbs", "distro", "build", "tacos-stable-x86_64",
+            "--distributed",
+            "--coordinator-port", "9000",
+            "--coordinator-url", "http://sohoai.lan:9000",
+            "--local-workers", "2",
+        ]).unwrap();
+
+        match cli.command {
+            Commands::Distro(args) => match args.action {
+                DistroCommands::Build {
+                    name,
+                    distributed,
+                    coordinator_port,
+                    coordinator_url,
+                    local_workers,
+                    ..
+                } => {
+                    assert_eq!(name.as_deref(), Some("tacos-stable-x86_64"));
+                    assert!(distributed);
+                    assert_eq!(coordinator_port, Some(9000));
+                    assert_eq!(coordinator_url.as_deref(), Some("http://sohoai.lan:9000"));
+                    assert_eq!(local_workers, Some(2));
+                }
+                _ => panic!("Expected DistroCommands::Build"),
+            },
+            _ => panic!("Expected Commands::Distro"),
+        }
+    }
+
+    #[test]
+    fn test_cli_explore_distro_flag() {
+        let cli_default = Cli::try_parse_from(["dbs", "explore", "--search", "strace"]).unwrap();
+        match cli_default.command {
+            Commands::Explore(args) => {
+                assert!(args.distro.is_none());
+                assert_eq!(args.search.as_deref(), Some("strace"));
+            }
+            _ => panic!("Expected Commands::Explore"),
+        }
+
+        let cli_explicit = Cli::try_parse_from([
+            "dbs", "explore", "-d", "centos-stream-10", "--search", "strace",
+        ]).unwrap();
+        match cli_explicit.command {
+            Commands::Explore(args) => {
+                assert_eq!(args.distro.as_deref(), Some("centos-stream-10"));
+                assert_eq!(args.search.as_deref(), Some("strace"));
+            }
+            _ => panic!("Expected Commands::Explore"),
         }
     }
 }

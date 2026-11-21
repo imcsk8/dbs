@@ -1069,5 +1069,6 @@ make distro-sign
 ## Next Steps
 
 * Explore [AGENTS.md](AGENTS.md) for technical architecture details and developer guidelines.
+* Follow [TUTORIAL_DISTRIBUTED.md](TUTORIAL_DISTRIBUTED.md) to set up multi-node distributed compilation clusters.
 * Check [README.md](README.md) for quick command references and project overview.
 * Review the source code in [`rust/src/main.rs`](rust/src/main.rs) and [`rust/src/dag/mod.rs`](rust/src/dag/mod.rs).

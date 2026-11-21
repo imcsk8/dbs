@@ -370,5 +370,29 @@ USING btree
     format
 );
 
+-- Cluster Worker Registration & Telemetry
+CREATE TABLE IF NOT EXISTS cluster_worker (
+    id SERIAL PRIMARY KEY,
+    worker_id INT NOT NULL UNIQUE,
+    node_name TEXT NOT NULL,
+    concurrency INT NOT NULL DEFAULT 1,
+    current_package_id INT REFERENCES package(id) ON DELETE SET NULL,
+    last_heartbeat TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    status TEXT NOT NULL DEFAULT 'IDLE'
+);
+COMMENT ON TABLE cluster_worker IS E'Registered cluster worker nodes and real-time heartbeat telemetry';
+
+CREATE INDEX IF NOT EXISTS idx_cluster_worker_id ON cluster_worker
+USING btree
+(
+    worker_id
+);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_worker_heartbeat ON cluster_worker
+USING btree
+(
+    last_heartbeat
+);
+
 
 COMMIT;

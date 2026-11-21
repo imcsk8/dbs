@@ -5,6 +5,7 @@ DROP TABLE IF EXISTS package_requires;
 DROP TABLE IF EXISTS package_provides;
 DROP TABLE IF EXISTS operating_system_package;
 DROP TABLE IF EXISTS package_dependencies;
+DROP TABLE IF EXISTS cluster_worker;
 DROP TABLE IF EXISTS product;
 DROP TABLE IF EXISTS operating_system;
 DROP TABLE IF EXISTS package_manager;

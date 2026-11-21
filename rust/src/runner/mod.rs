@@ -177,6 +177,8 @@ pub struct MockRunner {
     pub without_bconds: Vec<String>,
     /// RPM macros to define (`-D 'MACRO EXPR'`).
     pub defines: Vec<String>,
+    /// Additional remote or local repository URLs to inject via `--addrepo=<url_or_path>`.
+    pub additional_repos: Vec<String>,
 }
 
 impl MockRunner {
@@ -195,7 +197,24 @@ impl MockRunner {
             with_bconds: Vec::new(),
             without_bconds: Vec::new(),
             defines: Vec::new(),
+            additional_repos: Vec::new(),
         }
+    }
+
+    /// Adds an additional repository URL or path to inject via `--addrepo=<url_or_path>`.
+    pub fn with_additional_repo(mut self, repo_url: impl Into<String>) -> Self {
+        self.additional_repos.push(repo_url.into());
+        self
+    }
+
+    /// Sets additional repository URLs or paths to inject via `--addrepo=<url_or_path>`.
+    pub fn with_additional_repos<I, S>(mut self, repo_urls: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.additional_repos.extend(repo_urls.into_iter().map(Into::into));
+        self
     }
 
     /// Creates a MockRunner by automatically resolving a root profile name or .cfg file path.
@@ -457,6 +476,10 @@ impl MockRunner {
         if staging_repo.exists() && self.local_repo_dir.as_ref() != Some(&staging_repo) {
             let abs_staging = fs::canonicalize(&staging_repo).unwrap_or(staging_repo);
             rebuild_cmd.arg(format!("--addrepo=file://{}", abs_staging.display()));
+        }
+
+        for extra_repo in &self.additional_repos {
+            rebuild_cmd.arg(format!("--addrepo={}", extra_repo));
         }
 
         if let Some(smp) = self.smp_cpus {
@@ -1185,7 +1208,7 @@ pub fn extract_error_diagnostic(
 }
 
 /// Recursively discovers all generated `.rpm` and `.src.rpm` files within a directory.
-fn collect_artifacts(dir: &Path) -> Vec<PathBuf> {
+pub fn collect_artifacts(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if !dir.exists() {
         return files;

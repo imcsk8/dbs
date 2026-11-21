@@ -13,7 +13,7 @@ use crate::cli::{
     self, BuildArgs, ChrootArgs, ChrootCommands, CleanArgs, CompsArgs, CompsCommands, ConfigArgs,
     ConfigCommands, DagArgs, DbArgs, DbCommands, DistgitArgs, DistgitCommands, DistroArgs,
     DistroCommands, ExploreArgs, LookasideArgs, LookasideCommands, MonitorArgs, OsArgs, PkgArgs,
-    RetryArgs, ShellArgs,
+    RetryArgs, ShellArgs, WorkerArgs,
 };
 use crate::chroot;
 use crate::config::DbsConfig;
@@ -32,10 +32,11 @@ use crate::tui::{run_explorer, run_monitor};
 
 /// Dispatches the `explore` subcommand to discover remote packages in dist-git.
 pub async fn handle_explore(args: ExploreArgs, dbs_cfg: &DbsConfig) -> Result<()> {
-    let mut config = match dbs_cfg.resolve_distro(&args.distro) {
+    let distro = args.distro.as_deref().unwrap_or(&dbs_cfg.distgit.distro);
+    let mut config = match dbs_cfg.resolve_distro(distro) {
         Ok(cfg) => cfg,
         Err(_) => {
-            println!("Unknown distribution preset: '{}'. Available presets:", args.distro);
+            println!("Unknown distribution preset: '{}'. Available presets:", distro);
             for p in DistroConfig::all_presets() {
                 println!("  * {} (branch: {}, api: {})", p.name, p.dist_git_branch, p.api_type);
             }
@@ -106,6 +107,72 @@ pub async fn handle_explore(args: ExploreArgs, dbs_cfg: &DbsConfig) -> Result<()
 pub async fn handle_monitor(args: MonitorArgs, dbs_cfg: &DbsConfig) -> Result<()> {
     run_monitor(dbs_cfg.clone(), args.distro).await?;
     Ok(())
+}
+
+/// Dispatches the `worker` subcommand to run a distributed build worker node.
+pub async fn handle_worker(args: WorkerArgs, dbs_cfg: &DbsConfig) -> Result<()> {
+    let effective_db = args.db
+        .or_else(|| dbs_cfg.database.url.clone())
+        .or_else(db::get_database_url);
+
+    let effective_chroot = args.root
+        .or_else(|| dbs_cfg.distro.chroot.clone())
+        .unwrap_or_else(|| dbs_cfg.chroot.profile.clone());
+
+    let effective_config_dir = args.config_dir
+        .or_else(|| dbs_cfg.chroot.config_dir.clone());
+
+    let effective_worker_id = args.worker_id
+        .or(dbs_cfg.cluster.worker_id)
+        .unwrap_or_else(|| {
+            let pid = std::process::id();
+            100 + (pid % 800) as i32
+        });
+
+    let effective_node_name = args.node_name
+        .unwrap_or_else(|| std::env::var("HOSTNAME").unwrap_or_else(|_| "dbs-worker".to_string()));
+
+    let effective_concurrency = if args.concurrency > 0 {
+        args.concurrency
+    } else {
+        dbs_cfg.cluster.concurrency
+    };
+
+    let effective_smp = args.smp
+        .or(Some(dbs_cfg.chroot.smp_cpus));
+
+    let effective_work_dir = args.work_dir
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("dbs-worker-{}", effective_worker_id)));
+
+    let effective_coordinator_url = if args.coordinator_url != "http://127.0.0.1:8080" {
+        args.coordinator_url
+    } else if let Some(url) = &dbs_cfg.cluster.coordinator_url {
+        url.clone()
+    } else {
+        args.coordinator_url
+    };
+
+    let mut effective_nocheck_pkgs = dbs_cfg.build.nocheck_packages.clone();
+    effective_nocheck_pkgs.extend(args.nocheck_packages);
+
+    let worker_config = crate::cluster::WorkerConfig {
+        db_url: effective_db,
+        coordinator_url: effective_coordinator_url,
+        worker_id: effective_worker_id,
+        node_name: effective_node_name,
+        root_name: effective_chroot,
+        config_dir: effective_config_dir,
+        concurrency: effective_concurrency,
+        smp_cpus: effective_smp,
+        work_dir: effective_work_dir,
+        heartbeat_interval_secs: args.heartbeat_interval,
+        poll_interval_secs: args.poll_interval,
+        keep_build_dir: args.keep_build_dir,
+        nocheck: args.nocheck || dbs_cfg.build.nocheck,
+        nocheck_packages: effective_nocheck_pkgs,
+    };
+
+    crate::cluster::run_worker(worker_config).await
 }
 
 /// Dispatches the `distgit` subcommand for cloning, pulling, syncing, and inspecting.
@@ -1686,6 +1753,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             break_cycles,
             nocheck,
             nocheck_packages,
+            distributed,
+            coordinator_port,
+            coordinator_url,
+            local_workers,
             targets,
         } => {
             let name = name.unwrap_or_else(|| dbs_cfg.distro.name.clone());
@@ -1703,6 +1774,16 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             let record_db = record_db || dbs_cfg.database.record_db;
             let nocheck = nocheck || dbs_cfg.build.nocheck;
 
+            let is_distributed = distributed || dbs_cfg.cluster.enabled;
+            let effective_coord_port = coordinator_port
+                .unwrap_or(dbs_cfg.cluster.coordinator_port);
+            let effective_coord_host = dbs_cfg.cluster.coordinator_host.clone();
+            let effective_coord_url = coordinator_url
+                .or_else(|| dbs_cfg.cluster.coordinator_url.clone())
+                .unwrap_or_else(|| format!("http://127.0.0.1:{}", effective_coord_port));
+            let effective_local_workers = local_workers
+                .unwrap_or(dbs_cfg.cluster.local_workers);
+
             let mut effective_nocheck_pkgs = dbs_cfg.build.nocheck_packages.clone();
             effective_nocheck_pkgs.extend(nocheck_packages);
 
@@ -1715,6 +1796,11 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             println!(" SMP Concurrency:     {} cores (-j{})", smp, smp);
             println!(" Cycle Breaker:       {}", if break_cycles { "Enabled (Base chroot fallback)" } else { "Strict (Fail on cycle)" });
             println!(" Test Execution:      {}", if nocheck { "Disabled (--nocheck)" } else { "Enabled (%check)" });
+            if is_distributed {
+                println!(" Cluster Mode:       Enabled (Distributed PostgreSQL Queue)");
+                println!(" Coordinator URL:    {}", effective_coord_url);
+                println!(" Local Worker Slots: {}", effective_local_workers);
+            }
             if !effective_nocheck_pkgs.is_empty() && !nocheck {
                 println!(" Test Exemptions:     {} package(s) skip %check: {}", effective_nocheck_pkgs.len(), effective_nocheck_pkgs.join(", "));
             }
@@ -1835,10 +1921,10 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
             effective_nocheck_pkgs.dedup();
 
             // 3. Setup Mock runner engine
-            let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir)?;
+            let mut mock_runner = MockRunner::resolve(&mock_root, mock_config_dir.clone())?;
             mock_runner = mock_runner.with_smp_cpus(smp);
             mock_runner = mock_runner.with_nocheck(nocheck);
-            mock_runner = mock_runner.with_nocheck_packages(effective_nocheck_pkgs);
+            mock_runner = mock_runner.with_nocheck_packages(effective_nocheck_pkgs.clone());
             let distro_repo = dbs_cfg.distro.dest.join(&dbs_cfg.distro.name).join(&dbs_cfg.distro.arch);
             if distro_repo.is_dir() {
                 mock_runner = mock_runner.with_local_repo(distro_repo);
@@ -1852,10 +1938,35 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
                 }
             let runner_arc = Arc::new(mock_runner);
 
-            let mut db_conn = if record_db {
+            let mut db_conn = if record_db || is_distributed {
                 db::establish_connection_with_url(dbs_cfg.database.url.as_deref()).ok()
             } else {
                 None
+            };
+
+            let _coordinator_handle = if is_distributed {
+                println!("\n▶ Spawning embedded HTTP Coordinator on {}:{}...", effective_coord_host, effective_coord_port);
+                Some(crate::cluster::spawn_coordinator_http(
+                    staging_dir.clone(),
+                    effective_coord_host.clone(),
+                    effective_coord_port,
+                ))
+            } else {
+                None
+            };
+
+            let coord_cfg = crate::cluster::CoordinatorConfig {
+                host: effective_coord_host.clone(),
+                port: effective_coord_port,
+                public_url: effective_coord_url.clone(),
+                staging_dir: staging_dir.clone(),
+                distro_name: name.clone(),
+                arch: dbs_cfg.distro.arch.clone(),
+                mock_root: mock_root.clone(),
+                mock_config_dir: mock_config_dir.clone(),
+                lookaside_dir: lookaside_dir.clone(),
+                local_workers: effective_local_workers,
+                db_url: dbs_cfg.database.url.clone(),
             };
 
             // 4. Execute stages sequentially
@@ -1930,22 +2041,79 @@ pub async fn handle_distro(args: DistroArgs, dbs_cfg: &DbsConfig) -> Result<()> 
 
                     let targets = layer_targets;
 
-                    let results = runner_arc
-                        .clone()
-                        .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
-                        .await;
+                    if is_distributed {
+                        let conn_mut = db_conn.as_mut().ok_or_else(|| {
+                            eyre!("Database connection is required for distributed cluster compilation")
+                        })?;
 
-                    for (idx, res) in results.into_iter().enumerate() {
-                        match res {
-                            Ok(out) => {
-                                print_build_output(&out);
-                                if let Some(conn) = &mut db_conn
-                                    && let Some(target) = targets.get(idx) {
-                                        let pkg_name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
-                                        let _ = db::record_build_result(conn, pkg_name, &out);
-                                    }
+                        // 1. Prepare SRPMs and enqueue layer packages into PostgreSQL
+                        let queued = crate::cluster::prepare_layer_srpms(
+                            &targets,
+                            &coord_cfg,
+                            conn_mut,
+                        )?;
+
+                        // 2. Optionally spawn local worker slots if configured
+                        let local_worker_tasks = if coord_cfg.local_workers > 0 {
+                            let mut local_tasks = Vec::new();
+                            for slot in 1..=coord_cfg.local_workers {
+                                let local_wid = slot as i32;
+                                let worker_cfg = crate::cluster::WorkerConfig {
+                                    db_url: dbs_cfg.database.url.clone(),
+                                    coordinator_url: coord_cfg.public_url.clone(),
+                                    worker_id: local_wid,
+                                    node_name: format!("{}-local-{}", dbs_cfg.distro.name, local_wid),
+                                    root_name: mock_root.clone(),
+                                    config_dir: mock_config_dir.clone(),
+                                    concurrency: 1,
+                                    smp_cpus: Some(smp),
+                                    work_dir: std::env::temp_dir().join(format!("dbs-local-{}", local_wid)),
+                                    heartbeat_interval_secs: 10,
+                                    poll_interval_secs: 2,
+                                    keep_build_dir: false,
+                                    nocheck,
+                                    nocheck_packages: effective_nocheck_pkgs.clone(),
+                                };
+                                local_tasks.push(tokio::spawn(async move {
+                                    let _ = crate::cluster::run_worker(worker_cfg).await;
+                                }));
                             }
-                            Err(e) => eprintln!("✗ Worker build error: {}", e),
+                            Some(local_tasks)
+                        } else {
+                            None
+                        };
+
+                        // 3. Monitor and coordinate layer completion
+                        crate::cluster::coordinate_layer_build(layer.layer_index, &queued, &coord_cfg).await?;
+
+                        // 4. Abort local workers when layer finishes
+                        if let Some(tasks) = local_worker_tasks {
+                            for t in tasks {
+                                t.abort();
+                            }
+                        }
+
+                        // 5. Update local staging repo with newly compiled RPMs for next layer
+                        let local_rpms_dir = staging_dir.join("rpms").join(&dbs_cfg.distro.arch);
+                        runner::update_local_repo(&local_rpms_dir);
+                    } else {
+                        let results = runner_arc
+                            .clone()
+                            .build_parallel(targets.clone(), staging_dir.clone(), concurrency, true)
+                            .await;
+
+                        for (idx, res) in results.into_iter().enumerate() {
+                            match res {
+                                Ok(out) => {
+                                    print_build_output(&out);
+                                    if let Some(conn) = &mut db_conn
+                                        && let Some(target) = targets.get(idx) {
+                                            let pkg_name = target.file_stem().and_then(|s| s.to_str()).unwrap_or("pkg");
+                                            let _ = db::record_build_result(conn, pkg_name, &out);
+                                        }
+                                }
+                                Err(e) => eprintln!("✗ Worker build error: {}", e),
+                            }
                         }
                     }
                 }
@@ -3315,6 +3483,28 @@ mod tests {
         // Both the requested subpackage and the parent spec stem should be marked nocheck
         assert!(nocheck_pkgs.contains(&"intel-vsc-firmware".to_string()));
         assert!(nocheck_pkgs.contains(&"linux-firmware".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_explore_resolves_distro_from_config() {
+        let (mut dbs_cfg, _) = DbsConfig::load(None).unwrap();
+        dbs_cfg.distgit.distro = "nonexistent-distro-for-test".to_string();
+
+        let args = ExploreArgs {
+            distro: None,
+            search: Some("strace".to_string()),
+            limit: 10,
+            all: false,
+            interactive: false,
+            api_key: None,
+            git_url_template: None,
+            branch: None,
+            api_url: None,
+            api_type: None,
+        };
+
+        let res = handle_explore(args, &dbs_cfg).await;
+        assert!(res.is_ok());
     }
 }
 

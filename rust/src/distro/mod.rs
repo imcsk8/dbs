@@ -454,7 +454,94 @@ pub async fn run_http_server(root_path: PathBuf, host: &str, port: u16) -> Resul
             let first_line = req_str.lines().next().unwrap_or("");
             let parts: Vec<&str> = first_line.split_whitespace().collect();
 
-            if parts.len() < 2 || (parts[0] != "GET" && parts[0] != "HEAD") {
+            if parts.len() < 2 {
+                let _ = socket.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+                return;
+            }
+
+            // Health check endpoint
+            if parts[1] == "/health" || parts[1] == "/api/status" {
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}").await;
+                return;
+            }
+
+            // Handle PUT file uploads (e.g. from remote build workers)
+            if parts[0] == "PUT" {
+                let req_url = parts[1];
+                let dest_rel = if let Some(query) = req_url.strip_prefix("/upload?") {
+                    let mut found = None;
+                    for pair in query.split('&') {
+                        if let Some((k, v)) = pair.split_once('=')
+                            && (k == "dest" || k == "path" || k == "file" || k == "filename") {
+                                found = Some(v.to_string());
+                                break;
+                            }
+                    }
+                    found.unwrap_or_else(|| req_url.trim_start_matches('/').to_string())
+                } else if let Some(stripped) = req_url.strip_prefix("/upload/") {
+                    stripped.to_string()
+                } else {
+                    req_url.trim_start_matches('/').to_string()
+                };
+
+                let safe_path = dest_rel.replace("..", "").trim_start_matches('/').to_string();
+                let target_dest = base_dir.join(&safe_path);
+
+                if let Some(parent) = target_dest.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+
+                let mut content_length: usize = 0;
+                for line in req_str.lines() {
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = v.trim().parse::<usize>().unwrap_or(0);
+                        }
+                }
+
+                let header_end = req_str.find("\r\n\r\n").map(|idx| idx + 4)
+                    .or_else(|| req_str.find("\n\n").map(|idx| idx + 2))
+                    .unwrap_or(n);
+
+                let initial_body = &buf[header_end..n];
+                let mut file = match tokio::fs::File::create(&target_dest).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let resp = format!("HTTP/1.1 500 Internal Error\r\n\r\nFailed to create file: {}", e);
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                };
+
+                if !initial_body.is_empty()
+                    && let Err(e) = file.write_all(initial_body).await {
+                        let resp = format!("HTTP/1.1 500 Internal Error\r\n\r\nWrite error: {}", e);
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+
+                let mut remaining = content_length.saturating_sub(initial_body.len());
+                let mut stream_buf = [0u8; 65536];
+                while remaining > 0 {
+                    let to_read = remaining.min(stream_buf.len());
+                    let read_n = match socket.read(&mut stream_buf[..to_read]).await {
+                        Ok(bytes) if bytes > 0 => bytes,
+                        _ => break,
+                    };
+                    if let Err(e) = file.write_all(&stream_buf[..read_n]).await {
+                        let resp = format!("HTTP/1.1 500 Internal Error\r\n\r\nWrite error: {}", e);
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                    remaining -= read_n;
+                }
+
+                let _ = file.flush().await;
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await;
+                return;
+            }
+
+            if parts[0] != "GET" && parts[0] != "HEAD" {
                 let _ = socket.write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n").await;
                 return;
             }
