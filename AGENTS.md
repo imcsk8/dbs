@@ -231,6 +231,21 @@ dbs monitor
 dbs top
 ```
 
+### Distributed Cluster Compilation & Worker Nodes
+```bash
+# Start orchestrator build with embedded HTTP coordinator & PostgreSQL queue
+dbs distro build tacos-stable-x86_64 --distributed --coordinator-port 8080 -j 4 --record-db
+
+# Run orchestrator without local workers (100% remote compilation across cluster nodes)
+dbs distro build tacos-stable-x86_64 --distributed --local-workers 0
+
+# Run a distributed worker node on another machine connected to orchestrator
+dbs worker --db postgres://dbs:pass@sohoai:5432/dbs --coordinator-url http://sohoai:8080 -j 8 --root tacos-stable-x86_64
+
+# Run worker with custom worker ID, SMP threads, and test exemptions
+dbs worker --coordinator-url http://sohoai:8080 --worker-id 101 -j 8 --smp 16 --nocheck
+```
+
 ### Package Supply Chain Catalog
 ```bash
 # Query package catalog in the database
